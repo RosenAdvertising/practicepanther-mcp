@@ -78,6 +78,32 @@ def test_put_sends_id_query_param_and_full_body(client):
     assert calls[0]["json"] == body
 
 
+def test_create_account_omits_empty_primary_contact_and_includes_provided(client):
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append(
+            {
+                "method": method,
+                "url": url,
+                "json": kwargs["json"],
+            }
+        )
+        return DummyResponse(200, {"created": True})
+
+    client.session.request = fake_request
+
+    client.create_account(display_name="X")
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"].endswith("/api/v2/accounts")
+    assert calls[0]["json"] == {"display_name": "X"}
+    assert "primary_contact" not in calls[0]["json"]
+
+    primary_contact = {"first_name": "Alex", "email_address": "alex@example.com"}
+    client.create_account(display_name="Y", primary_contact=primary_contact)
+    assert calls[1]["json"]["primary_contact"] == primary_contact
+
+
 def test_invalid_grant_refresh_persists_rotated_tokens_and_retries(
     client, monkeypatch
 ):

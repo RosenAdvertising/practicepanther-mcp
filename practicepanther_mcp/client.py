@@ -72,7 +72,10 @@ def _compact(values: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in values.items()
-        if value is not None and value != "" and value != []
+        if value is not None
+        and value != ""
+        and value != []
+        and not (isinstance(value, dict) and not value)
     }
 
 
@@ -303,7 +306,7 @@ class PracticePantherClient:
                 "address_zip_code": address_zip_code,
                 "notes": notes,
                 "tags": tags or [],
-                "primary_contact": primary_contact or {},
+                "primary_contact": primary_contact,
             }
         )
         return self.post("/accounts", body)
