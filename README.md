@@ -208,37 +208,10 @@ uv run --with pytest pytest -q
 uv build
 ```
 
-MCP certification uses a private cert pack outside this public repo. From that
-cert-pack directory, run the offline tiers:
-
-```bash
-uv run \
-  --with-editable /Users/tobyrosen/Cowork/RA-Projects/mcp-test-kit \
-  --with-editable /path/to/practicepanther-mcp \
-  --with pytest \
-  mcp-test-kit run --tier contract --config config.py
-
-uv run \
-  --with-editable /Users/tobyrosen/Cowork/RA-Projects/mcp-test-kit \
-  --with-editable /path/to/practicepanther-mcp \
-  --with pytest \
-  mcp-test-kit run --tier static --config config.py
-
-uv run \
-  --with-editable /Users/tobyrosen/Cowork/RA-Projects/mcp-test-kit \
-  --with-editable /path/to/practicepanther-mcp \
-  --with pytest \
-  mcp-test-kit run --tier secrets --config config.py
-
-uv run \
-  --with-editable /Users/tobyrosen/Cowork/RA-Projects/mcp-test-kit \
-  --with-editable /path/to/practicepanther-mcp \
-  --with pytest \
-  mcp-test-kit run --tier coverage --config config.py
-```
-
-Smoke and write tiers are configured in the private cert pack but are not run
-until live PracticePanther OAuth keys and seed data are available.
+Certification beyond the pytest suite (contract/spec-check, secrets, coverage, live smoke
+and write tiers) runs from a private cert pack with an internal MCP test toolkit; those
+artifacts are intentionally not part of this repository. Live smoke/write tiers run once
+API credentials are provisioned.
 
 ## License
 
