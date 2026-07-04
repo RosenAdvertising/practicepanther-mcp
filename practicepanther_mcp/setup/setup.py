@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import getpass
 import secrets
 import sys
 from urllib.parse import urlencode
@@ -26,7 +27,7 @@ def main() -> None:
     )
 
     client_id = input("PracticePanther Client ID: ").strip()
-    client_secret = input("PracticePanther Client Secret: ").strip()
+    client_secret = getpass.getpass("PracticePanther Client Secret: ").strip()
     redirect_uri = (
         input(
             f"Redirect URI [{credentials.DEFAULT_REDIRECT_URI}]: "
