@@ -4,6 +4,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-F59E0B.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/MCP-compatible-7C3AED.svg)](https://modelcontextprotocol.io)
 
+> [!IMPORTANT]
+> **Built to spec — not yet verified against a live PracticePanther account.**
+> This server was built from PracticePanther's public API documentation and passes its full offline test suite, but we don't currently have PracticePanther API access to verify behavior against the live API. Endpoint paths, parameters, and response shapes follow the documented spec. If you hit a discrepancy, please open an issue.
+
 MCP server for PracticePanther KISS API v2: law practice management accounts,
 contacts, matters, tasks, calendar events, notes, time entries, billing reads,
 activity, and metadata.
