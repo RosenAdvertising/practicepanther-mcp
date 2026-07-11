@@ -182,6 +182,15 @@ records.
 | Metadata | `list_custom_fields` | List custom fields for `company`, `matter`, or `contact` |
 | Metadata | `list_tags` | List tags for `account`, `matter`, or `activity` |
 
+## Prompts & resources
+
+- Prompt `daily_docket_review` reviews today's and overdue tasks, today's events, and matters needing attention.
+- Prompt `new_client_intake(client_name, matter_description)` guides duplicate-safe account and matter intake with initial follow-up work.
+- Prompt `billing_hygiene_check` checks recent billing activity for unbilled work, stale WIP, invoices, and payments.
+- Resource `practicepanther://users` returns firm users as JSON reference data.
+- Resource `practicepanther://reference-data` returns company, matter, and contact custom fields plus account, matter, and activity tags as JSON.
+- Resource `practicepanther://security-notes` documents data sensitivity, write scope, OAuth token handling, and prompt-injection risks.
+
 ## API Notes
 
 - Base URL: `https://app.practicepanther.com/api/v2/`
