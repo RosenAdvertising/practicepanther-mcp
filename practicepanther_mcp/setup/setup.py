@@ -40,12 +40,13 @@ def main() -> None:
         sys.exit(1)
 
     state = secrets.token_urlsafe(24)
-    authorize_url = f"{AUTH_URL}?{urlencode({
+    authorize_params = {
         'response_type': 'code',
         'client_id': client_id,
         'redirect_uri': redirect_uri,
         'state': state,
-    })}"
+    }
+    authorize_url = f"{AUTH_URL}?{urlencode(authorize_params)}"
 
     print("\nOpen this URL in a browser, approve access, then paste the code from the redirect:")
     print(authorize_url)
@@ -67,14 +68,14 @@ def main() -> None:
         timeout=30,
     )
     if not resp.ok:
-        print(f"Token exchange failed ({resp.status_code}): {resp.text}")
+        print(f"Token exchange failed ({resp.status_code}).")
         sys.exit(1)
 
     tokens = resp.json()
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
     if not access_token or not refresh_token:
-        print(f"Token exchange response was incomplete: {tokens}")
+        print("Token exchange response was incomplete.")
         sys.exit(1)
 
     path = credentials.save_values(

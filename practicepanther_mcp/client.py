@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from typing import Any
@@ -25,15 +26,22 @@ MATTER_STATUSES = {"Closed", "Pending", "Open", "Archived"}
 CALL_DIRECTIONS = {"Inbound", "Outbound"}
 CUSTOM_FIELD_TYPES = {"company", "matter", "contact"}
 TAG_TYPES = {"account", "matter", "activity"}
+logger = logging.getLogger(__name__)
 
 
 def _json_response(resp: requests.Response) -> Any:
     try:
         return resp.json()
     except ValueError as exc:
+        logger.warning(
+            "Rejected PracticePanther API response: response body was not JSON",
+            extra={
+                "event": "practicepanther_api_response_rejected",
+                "status_code": resp.status_code,
+            },
+        )
         raise RuntimeError(
-            f"PracticePanther API returned non-JSON ({resp.status_code}): "
-            f"{resp.text[:400]}"
+            f"PracticePanther API returned non-JSON ({resp.status_code})"
         ) from exc
 
 
@@ -64,6 +72,13 @@ def _user_ref(user: dict[str, Any]) -> dict[str, str]:
 
 def _validate(value: str, allowed: set[str], field_name: str) -> None:
     if value and value not in allowed:
+        logger.warning(
+            "Rejected PracticePanther request: unsupported enum value",
+            extra={
+                "event": "practicepanther_validation_rejected",
+                "field": field_name,
+            },
+        )
         valid = ", ".join(sorted(allowed))
         raise ValueError(f"{field_name} must be one of: {valid}")
 
@@ -90,6 +105,10 @@ class PracticePantherClient:
             or not self.creds.access_token
             or not self.creds.refresh_token
         ):
+            logger.warning(
+                "Rejected PracticePanther client initialization: credentials incomplete",
+                extra={"event": "practicepanther_credentials_rejected"},
+            )
             raise RuntimeError(
                 "PracticePanther credentials not found. Run: practicepanther-mcp-setup"
             )
@@ -131,12 +150,23 @@ class PracticePantherClient:
         )
 
         if not resp.ok:
-            raise RuntimeError(f"{REAUTH_MESSAGE}. Response: {resp.text[:400]}")
+            logger.warning(
+                "Rejected PracticePanther OAuth refresh: provider response was unsuccessful",
+                extra={
+                    "event": "practicepanther_oauth_refresh_rejected",
+                    "status_code": resp.status_code,
+                },
+            )
+            raise RuntimeError(f"{REAUTH_MESSAGE}. Status: {resp.status_code}.")
 
         token_data = _json_response(resp)
         access_token = token_data.get("access_token", "")
         refresh_token = token_data.get("refresh_token", "")
         if not access_token or not refresh_token:
+            logger.warning(
+                "Rejected PracticePanther OAuth refresh: token response was incomplete",
+                extra={"event": "practicepanther_oauth_refresh_rejected"},
+            )
             raise RuntimeError(f"{REAUTH_MESSAGE}. Token response was incomplete.")
 
         credentials.save_values(
@@ -193,9 +223,14 @@ class PracticePantherClient:
             )
 
         if not resp.ok:
-            raise RuntimeError(
-                f"PracticePanther API error {resp.status_code}: {resp.text[:400]}"
+            logger.warning(
+                "Rejected PracticePanther API request: provider returned an error",
+                extra={
+                    "event": "practicepanther_api_request_rejected",
+                    "status_code": resp.status_code,
+                },
             )
+            raise RuntimeError(f"PracticePanther API error {resp.status_code}")
 
         if resp.status_code == 204 or not resp.text:
             return {"success": True}
@@ -219,8 +254,20 @@ class PracticePantherClient:
         return self.put(path, body=body, params={"id": resource_id})
 
     def _odata(
-        self, top: int = 50, skip: int = 0, order_by: str = ""
+        self, top: int = 50, skip: int = 0, order_by: str = "id asc"
     ) -> dict[str, Any]:
+        if not 1 <= top <= 200:
+            logger.warning(
+                "Rejected PracticePanther list request: top is outside allowed range",
+                extra={"event": "practicepanther_list_validation_rejected"},
+            )
+            raise ValueError("top must be between 1 and 200")
+        if skip < 0:
+            logger.warning(
+                "Rejected PracticePanther list request: skip is negative",
+                extra={"event": "practicepanther_list_validation_rejected"},
+            )
+            raise ValueError("skip must be zero or greater")
         params: dict[str, Any] = {"$top": top, "$skip": skip}
         if order_by:
             params["$orderby"] = order_by
@@ -231,9 +278,11 @@ class PracticePantherClient:
     ) -> Any:
         current = self.get(f"{path}/{resource_id}")
         if not isinstance(current, dict):
-            raise RuntimeError(
-                f"Expected object from PracticePanther GET {path}/{resource_id}"
+            logger.warning(
+                "Rejected PracticePanther update: current resource was not an object",
+                extra={"event": "practicepanther_update_rejected"},
             )
+            raise RuntimeError("PracticePanther update source was not an object")
         body = {**current, **overlay}
         return self.put_with_id(path, resource_id, body)
 
@@ -242,8 +291,14 @@ class PracticePantherClient:
     def get_current_user(self) -> Any:
         return self.get("/users/me")
 
-    def list_users(self, email_address: str = "", top: int = 50, skip: int = 0) -> Any:
-        params = self._odata(top=top, skip=skip)
+    def list_users(
+        self,
+        email_address: str = "",
+        top: int = 50,
+        skip: int = 0,
+        order_by: str = "id asc",
+    ) -> Any:
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(_compact({"email_address": email_address}))
         return self.get("/users", params=params)
 
@@ -261,7 +316,7 @@ class PracticePantherClient:
         updated_since: str = "",
         top: int = 50,
         skip: int = 0,
-        order_by: str = "",
+        order_by: str = "id asc",
     ) -> Any:
         params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
@@ -324,8 +379,9 @@ class PracticePantherClient:
         company_name: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -352,7 +408,7 @@ class PracticePantherClient:
         matter_tag: str = "",
         top: int = 50,
         skip: int = 0,
-        order_by: str = "",
+        order_by: str = "id asc",
     ) -> Any:
         if status:
             _validate(status, MATTER_STATUSES, "status")
@@ -422,10 +478,11 @@ class PracticePantherClient:
         due_date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
         if status:
             _validate(status, TASK_STATUSES, "status")
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -491,8 +548,9 @@ class PracticePantherClient:
         assigned_to_user_id: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -547,8 +605,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -585,8 +644,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -631,8 +691,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -682,8 +743,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -704,8 +766,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -726,8 +789,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -750,8 +814,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {

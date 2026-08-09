@@ -29,9 +29,8 @@ def check_api() -> bool:
         from practicepanther_mcp.client import PracticePantherClient
 
         client = PracticePantherClient()
-        me = client.get_current_user()
-        name = me.get("display_name") or me.get("email") or "unknown user"
-        print(f"Authenticated as: {name}")
+        client.get_current_user()
+        print("Authentication verified.")
 
         accounts = client.list_accounts(top=1)
         matters = client.list_matters(top=1)
