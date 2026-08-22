@@ -1,0 +1,14 @@
+name: CI
+# Thin caller -> shared reusable workflow (RosenAdvertising/oss-workflows@v1). This repo's last CI commit.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: RosenAdvertising/oss-workflows/.github/workflows/ci.yml@v1
