@@ -1,5 +1,12 @@
 # MCP 2026-07-28 migration report
 
+> Integration note (2026-09-28): This report records the original spec branch.
+> The integrated `v2-2026-09-28` branch keeps main's exact dependency
+> requirements (`mcp>=1.28.1`, `requests>=2.34.2`,
+> `python-dotenv>=1.2.2`) and regenerates `uv.lock` at `mcp==2.2.0` and
+> `mcp-types==2.2.0`. The test counts and branch mechanics below are historical;
+> validation of the integrated branch is recorded separately.
+
 ## Result
 
 `practicepanther-mcp` now targets MCP `2026-07-28`, up from `2025-11-25`.

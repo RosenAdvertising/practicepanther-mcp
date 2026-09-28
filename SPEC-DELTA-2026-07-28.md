@@ -1,5 +1,11 @@
 # MCP specification delta: 2025-11-25 to 2026-07-28
 
+> Integration note (2026-09-28): This is the spec branch's historical delta.
+> The integrated `v2-2026-09-28` branch preserves main's
+> `mcp>=1.28.1` requirement and resolves `mcp==2.2.0` in `uv.lock`.
+> The pre-migration dependency and pin statements below describe the original
+> spec branch, not the integrated branch.
+
 Research date: 2026-08-09. Sources are limited to the official MCP
 specification and the official MCP Python SDK documentation.
 
