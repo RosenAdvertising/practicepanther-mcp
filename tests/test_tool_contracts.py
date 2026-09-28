@@ -51,6 +51,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "email_address": "alex@example.com",
                 },
                 response={"tool": "list_users", "items": [1]},
@@ -165,6 +166,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "account_id": "account-1",
                     "status": "Active",
                     "company_name": "Acme",
@@ -274,6 +276,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "account_id": "account-1",
                     "matter_id": "matter-1",
                     "status": "InProgress",
@@ -386,6 +389,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "account_id": "account-1",
                     "matter_id": "matter-1",
                     "date_from": "2026-07-01T00:00:00+00:00",
@@ -467,6 +471,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "account_id": "account-1",
                     "matter_id": "matter-1",
                     "date_to": "2026-07-31T00:00:00+00:00",
@@ -507,6 +512,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "matter_id": "matter-1",
                     "user_id": "user-1",
                     "date_from": "2026-07-01T00:00:00+00:00",
@@ -569,6 +575,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "account_id": "account-1",
                     "matter_id": "matter-1",
                     "date_from": "2026-07-01T00:00:00+00:00",
@@ -632,6 +639,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "account_id": "account-1",
                     "matter_id": "matter-1",
                     "date_to": "2026-07-31T00:00:00+00:00",
@@ -656,6 +664,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "account_id": "account-1",
                     "matter_id": "matter-1",
                     "date_from": "2026-07-01T00:00:00+00:00",
@@ -680,6 +689,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "account_id": "account-1",
                     "matter_id": "matter-1",
                     "date_to": "2026-07-31T00:00:00+00:00",
@@ -704,6 +714,7 @@ TOOL_CONTRACTS: tuple[ToolContract, ...] = (
                 params={
                     "$top": 7,
                     "$skip": 3,
+                    "$orderby": "id asc",
                     "account_id": "account-1",
                     "matter_id": "matter-1",
                     "date_from": "2026-07-01T00:00:00+00:00",
@@ -908,14 +919,15 @@ def test_fetch_merge_put_overlay_for_each_update_tool(
     ]
 
 
-def test_non_200_error_surfaces_response_body(client: Any) -> None:
+def test_non_200_error_omits_upstream_response_body(client: Any) -> None:
     def fake_request(method: str, url: str, **kwargs: Any) -> DummyResponse:
         return DummyResponse(500, {"ignored": True}, text="upstream exploded")
 
     client.session.request = fake_request
 
-    with pytest.raises(RuntimeError, match="500: upstream exploded"):
+    with pytest.raises(RuntimeError, match="PracticePanther API error 500") as exc:
         client.get("/users/me")
+    assert "upstream exploded" not in str(exc.value)
 
 
 @pytest.mark.parametrize(

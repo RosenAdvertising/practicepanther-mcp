@@ -4,13 +4,32 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
+from pydantic import Field
 
 from practicepanther_mcp.client import PracticePantherClient
 
-mcp = FastMCP(
+ListTop = Annotated[
+    int,
+    Field(
+        ge=1,
+        le=200,
+        description="Maximum number of records returned by this request.",
+    ),
+]
+ListSkip = Annotated[
+    int,
+    Field(ge=0, description="Number of records to skip before returning results."),
+]
+OrderBy = Annotated[
+    str,
+    Field(description="OData field and direction, for example 'updated_at desc'."),
+]
+
+
+mcp = MCPServer(
     "practicepanther-mcp",
     instructions=(
         "Access PracticePanther matters, accounts, contacts, tasks, calendar, "
@@ -190,10 +209,20 @@ def get_current_user() -> dict:
 
 
 @mcp.tool()
-def list_users(email_address: str = "", top: int = 50, skip: int = 0) -> dict:
+def list_users(
+    email_address: str = "",
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
+) -> dict:
     """List firm users, optionally filtered by email address."""
 
-    return _client().list_users(email_address=email_address, top=top, skip=skip)
+    return _client().list_users(
+        email_address=email_address,
+        top=top,
+        skip=skip,
+        order_by=order_by,
+    )
 
 
 @mcp.tool()
@@ -213,9 +242,9 @@ def list_accounts(
     account_tag: str = "",
     created_since: str = "",
     updated_since: str = "",
-    top: int = 50,
-    skip: int = 0,
-    order_by: str = "",
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List client accounts with optional filters and OData pagination."""
 
@@ -285,8 +314,9 @@ def list_contacts(
     search_text: str = "",
     status: str = "",
     company_name: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List contacts with optional account, search, status, and company filters."""
 
@@ -297,6 +327,7 @@ def list_contacts(
         company_name=company_name,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -317,9 +348,9 @@ def list_matters(
     search_text: str = "",
     assigned_to_user_id: str = "",
     matter_tag: str = "",
-    top: int = 50,
-    skip: int = 0,
-    order_by: str = "",
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List legal matters with optional filters and OData pagination."""
 
@@ -389,8 +420,9 @@ def list_tasks(
     assigned_to_user_id: str = "",
     due_date_from: str = "",
     due_date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List tasks with optional filters. status: NotCompleted, InProgress, Completed, or Conditional."""
 
@@ -403,6 +435,7 @@ def list_tasks(
         due_date_to=due_date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -460,8 +493,9 @@ def list_events(
     date_from: str = "",
     date_to: str = "",
     assigned_to_user_id: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List calendar events with optional matter, account, date, and user filters."""
 
@@ -473,6 +507,7 @@ def list_events(
         assigned_to_user_id=assigned_to_user_id,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -524,8 +559,9 @@ def list_notes(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List notes with optional matter, account, and date filters."""
 
@@ -536,6 +572,7 @@ def list_notes(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -566,8 +603,9 @@ def list_time_entries(
     user_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List hourly time entries with optional account, matter, user, and date filters."""
 
@@ -579,6 +617,7 @@ def list_time_entries(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -609,8 +648,9 @@ def list_expenses(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List expenses using the mixed-case PracticePanther Expenses path."""
 
@@ -621,6 +661,7 @@ def list_expenses(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -660,8 +701,9 @@ def list_flat_fees(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List fixed-fee billing entries."""
 
@@ -672,6 +714,7 @@ def list_flat_fees(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -681,8 +724,9 @@ def list_invoices(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List invoices. Invoices are read-only in this MCP server."""
 
@@ -693,6 +737,7 @@ def list_invoices(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -702,8 +747,9 @@ def list_payments(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List payments. Payments are read-only in this MCP server."""
 
@@ -714,6 +760,7 @@ def list_payments(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -726,8 +773,9 @@ def list_call_logs(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List phone call activity records."""
 
@@ -738,6 +786,7 @@ def list_call_logs(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
