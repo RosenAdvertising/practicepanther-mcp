@@ -15,6 +15,7 @@ activity, and metadata.
 ## Requirements
 
 - Python 3.10+
+- Python MCP SDK >=2.2,<3
 - A PracticePanther account with API access enabled
 - OAuth Client ID and Client Secret from PracticePanther
 - Claude Desktop or another MCP-compatible client
