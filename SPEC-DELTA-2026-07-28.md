@@ -1,39 +1,25 @@
 # MCP specification delta: 2025-11-25 to 2026-07-28
 
-> Integration note (2026-09-28): This is the spec branch's historical delta.
-> The integrated `v2-2026-09-28` branch preserves main's
-> `mcp>=1.28.1` requirement and resolves `mcp==2.2.0` in `uv.lock`.
-> The pre-migration dependency and pin statements below describe the original
-> spec branch, not the integrated branch.
+This note maps the protocol changes relevant to the current server. Sources
+are the official MCP specification and Python SDK documentation.
 
-Research date: 2026-08-09. Sources are limited to the official MCP
-specification and the official MCP Python SDK documentation.
+## Target and SDK
 
-## Current target and migration release
-
-The repository currently targets MCP `2025-11-25`:
-
-- `pyproject.toml` declares an unbounded `mcp>=1.0.0` dependency. The existing
-  local lockfile resolves MCP Python SDK `1.28.1`, whose latest protocol is
-  `2025-11-25`.
-- `practicepanther_mcp/server.py` imports and constructs the v1 `FastMCP`
-  surface without overriding protocol negotiation, so the SDK default is
-  authoritative.
-- The only configured production transport is stdio through `mcp.run()`.
-  There is no hosted HTTP entry point, protocol-version guard, or raw-wire
-  protocol test.
+The server targets MCP `2026-07-28` through `MCPServer`. `pyproject.toml`
+requires `mcp>=2.2,<3`, and `uv.lock` resolves `mcp` and `mcp-types` to
+2.2.0. The production entry point uses stdio through `mcp.run()`; tests also
+exercise an in-process SDK HTTP app and the protocol guard.
 
 The official changelog says `2026-07-28` follows `2025-11-25`
 ([spec changelog](https://modelcontextprotocol.io/specification/2026-07-28/changelog)).
 The official SDK migration guide identifies the v2 API changes used below
 ([Python SDK v1-to-v2 migration guide](https://py.sdk.modelcontextprotocol.io/migration/)).
-This migration pins the first SDK v2 release exactly: `mcp==2.0.0`.
 
 Verdicts below mean:
 
-- **AFFECTS-US**: this server exposes or relies on the changed surface. The SDK
-  may implement the wire behavior, but the migration must still pin, configure,
-  or test it.
+- **AFFECTS-US**: this server exposes or relies on the changed surface. The
+  SDK implements the wire behavior, with application and protocol assertions
+  described below.
 - **NOT-APPLICABLE**: the feature or direction is not implemented here. It will
   not be adopted merely because the new revision permits it.
 
@@ -41,8 +27,8 @@ Verdicts below mean:
 
 | Normative change | Verdict | Why |
 | --- | --- | --- |
-| Protocol-level sessions and `Mcp-Session-Id` are removed for the modern revision; cross-call state must use explicit handles. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#major-changes) | **AFFECTS-US** | The server is request-scoped and derives its PracticePanther client from persisted OAuth credentials on every tool/resource call. It has no MCP session state. Modern conformance must prove no session-header dependency. |
-| `initialize` / `notifications/initialized` are removed for modern requests. Each request carries protocol version, client capabilities, and optional client identity in `_meta`; version mismatch uses `UnsupportedProtocolVersionError`. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#major-changes) | **AFFECTS-US** | The stdio server must accept modern self-describing requests. SDK v2 supplies dual-era dispatch, which must retain legacy negotiation. |
+| Protocol-level sessions and `Mcp-Session-Id` are removed for the modern revision; cross-call state must use explicit handles. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#major-changes) | **AFFECTS-US** | The server is request-scoped and derives its PracticePanther client from persisted OAuth credentials on every tool/resource call. It has no MCP session state. Tests assert no modern session-header dependency. |
+| `initialize` / `notifications/initialized` are removed for modern requests. Each request carries protocol version, client capabilities, and optional client identity in `_meta`; version mismatch uses `UnsupportedProtocolVersionError`. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#major-changes) | **AFFECTS-US** | SDK v2 supplies dual-era dispatch. Tests cover modern self-describing requests and legacy negotiation. |
 | Servers MUST implement `server/discover`, advertising supported versions, capabilities, and identity. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#major-changes) | **AFFECTS-US** | Every modern server needs discovery. The result must describe the existing prompts, resources, and tools without inventing extensions. |
 | Every result requires `resultType`, normally `"complete"` or `"input_required"` for MRTR. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#major-changes) | **AFFECTS-US** | Tool, resource, prompt, discovery, and list results are all returned by this server. |
 | Server-initiated requests are replaced by Multi Round-Trip Requests (MRTR) using `InputRequiredResult`, `inputRequests`, and retry `inputResponses`. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#major-changes) | **NOT-APPLICABLE** | No tool, prompt, or resource uses sampling, roots, elicitation, or another server-to-client request. |
@@ -71,9 +57,9 @@ Verdicts below mean:
 | Normative change | Verdict | Why |
 | --- | --- | --- |
 | `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, and `resources/read` results require `ttlMs` and `cacheScope`. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#minor-changes) | **AFFECTS-US** | The server exposes tools, prompts, and resources. SDK v2's conservative private, zero-TTL defaults preserve the current no-cache posture. |
-| Servers SHOULD return `tools/list` in deterministic order. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#minor-changes) | **AFFECTS-US** | The server publishes 36 tools. Existing registration order is stable and will be tested across repeated listings. |
-| Tool schemas accept all JSON Schema 2020-12 keywords; structured content may be any JSON value. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#minor-changes) | **AFFECTS-US** | Decorators generate schemas for all 36 tools. SDK v2 owns revised validation; tests must prove object schemas, bounded list inputs, and ordinary JSON tool results still serialize correctly. The server does not opt into structured tool output merely to demonstrate the newly generalized shape. |
-| Resource-not-found changes from `-32002` to Invalid Params `-32602`. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#minor-changes) | **AFFECTS-US** | An unknown `practicepanther://` URI must now produce `-32602`. |
+| Servers SHOULD return `tools/list` in deterministic order. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#minor-changes) | **AFFECTS-US** | The server publishes 36 tools. Tests compare repeated listings for stable registration order. |
+| Tool schemas accept all JSON Schema 2020-12 keywords; structured content may be any JSON value. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#minor-changes) | **AFFECTS-US** | Decorators generate schemas for all 36 tools. SDK v2 owns revised validation; tests cover object schemas, bounded list inputs, and ordinary JSON tool results. The server does not opt into structured tool output merely to demonstrate the newly generalized shape. |
+| Resource-not-found changes from `-32002` to Invalid Params `-32602`. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#minor-changes) | **AFFECTS-US** | Tests assert `-32602` for an unknown `practicepanther://` URI. |
 | URL-mode elicitation removes its completion notification and `elicitationId`; retries use application `requestState`. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#minor-changes) | **NOT-APPLICABLE** | The server performs no elicitation. |
 | Generated schema numeric minimum/maximum/default types are corrected from integer-only to number. [Source](https://modelcontextprotocol.io/specification/2026-07-28/changelog#other-schema-changes) | **NOT-APPLICABLE** | The repository neither vendors the protocol schema nor validates directly against that generated meta-schema. SDK v2 absorbs the correction. |
 

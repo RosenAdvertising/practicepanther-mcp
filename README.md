@@ -6,7 +6,7 @@
 
 > [!IMPORTANT]
 > **Built to spec — not yet verified against a live PracticePanther account.**
-> This server was built from PracticePanther's public API documentation and passes its full offline test suite, but we don't currently have PracticePanther API access to verify behavior against the live API. Endpoint paths, parameters, and response shapes follow the documented spec. If you hit a discrepancy, please open an issue.
+> This server was built from PracticePanther's public API documentation and tested with mocked API responses. It has not been verified against a live account. If you hit a discrepancy, please open an issue.
 
 MCP server for PracticePanther KISS API v2: law practice management accounts,
 contacts, matters, tasks, calendar events, notes, time entries, billing reads,
@@ -27,8 +27,7 @@ PracticePanther in-app support chat: **Support** -> **Ask us Anything**. After
 approval, PracticePanther provides or enables access to an OAuth Client ID and
 Client Secret.
 
-There is no documented sandbox. Verification uses the live account associated
-with the OAuth grant.
+Verification uses the account associated with the OAuth grant.
 
 ## Installation
 
@@ -209,23 +208,30 @@ records.
 - Rate limits are undocumented. The client handles `429` defensively with
   exponential backoff and up to three retries.
 - Error body shapes beyond `{"error":"invalid_grant"}` are undocumented. The
-  client surfaces the raw response body in API exceptions.
+  client reports status and safe reason text without exposing response bodies.
 - CORS restrictions are irrelevant to this stdio MCP server; direct browser
   calls to PracticePanther should not be proxied through this package.
 
 ## Development
 
-Tests mock all HTTP and must not call the live API.
+The suite blocks `requests` network calls and uses fake credentials in an
+isolated temporary config directory. From the repository root, after installing
+the locked development dependencies:
 
 ```bash
-uv run --with pytest pytest -q
-uv build
+uv sync --locked --offline --group dev
+test_config_dir=$(mktemp -d)
+env -u PP_CLIENT_ID -u PP_CLIENT_SECRET -u PP_REDIRECT_URI \
+  -u PP_ACCESS_TOKEN -u PP_REFRESH_TOKEN \
+  PP_MCP_CONFIG_DIR="$test_config_dir" .venv/bin/python -m pytest -q
+rm -rf "$test_config_dir"
+.venv/bin/python tests/spec_check.py --mcp-only
+.venv/bin/ruff check .
+uv lock --check --offline
 ```
 
-Certification beyond the pytest suite (contract/spec-check, secrets, coverage, live smoke
-and write tiers) runs from a private cert pack with an internal MCP test toolkit; those
-artifacts are intentionally not part of this repository. Live smoke/write tiers run once
-API credentials are provisioned.
+The suite checks mocked API behavior and in-process MCP protocol behavior. It
+does not verify live PracticePanther responses or deployed transport behavior.
 
 ## License
 
