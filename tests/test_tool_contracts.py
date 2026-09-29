@@ -934,9 +934,17 @@ def test_non_200_error_omits_upstream_response_body(client: Any) -> None:
     ("method_name", "args", "message"),
     [
         ("list_matters", {"status": "Resolved"}, "status"),
-        ("create_matter", {"account_id": "account-1", "name": "X", "status": "Done"}, "status"),
+        (
+            "create_matter",
+            {"account_id": "account-1", "name": "X", "status": "Done"},
+            "status",
+        ),
         ("create_task", {"subject": "X", "priority": "Urgent"}, "priority"),
-        ("create_call_log", {"subject": "X", "call_direction": "Sideways"}, "call_direction"),
+        (
+            "create_call_log",
+            {"subject": "X", "call_direction": "Sideways"},
+            "call_direction",
+        ),
         ("list_tags", {"tag_type": "contact"}, "tag_type"),
     ],
 )

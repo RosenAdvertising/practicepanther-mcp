@@ -29,9 +29,7 @@ def main() -> None:
     client_id = input("PracticePanther Client ID: ").strip()
     client_secret = getpass.getpass("PracticePanther Client Secret: ").strip()
     redirect_uri = (
-        input(
-            f"Redirect URI [{credentials.DEFAULT_REDIRECT_URI}]: "
-        ).strip()
+        input(f"Redirect URI [{credentials.DEFAULT_REDIRECT_URI}]: ").strip()
         or credentials.DEFAULT_REDIRECT_URI
     )
 
@@ -41,14 +39,16 @@ def main() -> None:
 
     state = secrets.token_urlsafe(24)
     authorize_params = {
-        'response_type': 'code',
-        'client_id': client_id,
-        'redirect_uri': redirect_uri,
-        'state': state,
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "state": state,
     }
     authorize_url = f"{AUTH_URL}?{urlencode(authorize_params)}"
 
-    print("\nOpen this URL in a browser, approve access, then paste the code from the redirect:")
+    print(
+        "\nOpen this URL in a browser, approve access, then paste the code from the redirect:"
+    )
     print(authorize_url)
     code = input("\nAuthorization code: ").strip()
     if not code:

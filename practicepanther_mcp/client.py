@@ -273,9 +273,7 @@ class PracticePantherClient:
             params["$orderby"] = order_by
         return params
 
-    def _merge_put(
-        self, path: str, resource_id: str, overlay: dict[str, Any]
-    ) -> Any:
+    def _merge_put(self, path: str, resource_id: str, overlay: dict[str, Any]) -> Any:
         current = self.get(f"{path}/{resource_id}")
         if not isinstance(current, dict):
             logger.warning(

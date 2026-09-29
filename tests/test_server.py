@@ -115,9 +115,7 @@ def test_reference_data_resource_returns_all_metadata_as_json(
     from practicepanther_mcp import server
 
     client = Mock()
-    client.list_custom_fields.side_effect = lambda field_type: [
-        {"type": field_type}
-    ]
+    client.list_custom_fields.side_effect = lambda field_type: [{"type": field_type}]
     client.list_tags.side_effect = lambda tag_type: [{"type": tag_type}]
     monkeypatch.setattr(server, "_client", lambda: client)
 
@@ -152,7 +150,9 @@ def test_reference_data_resource_returns_all_metadata_as_json(
     [
         pytest.param(lambda server: server.daily_docket_review(), id="daily-docket"),
         pytest.param(
-            lambda server: server.new_client_intake("Example Client", "Contract dispute"),
+            lambda server: server.new_client_intake(
+                "Example Client", "Contract dispute"
+            ),
             id="new-client-intake",
         ),
         pytest.param(

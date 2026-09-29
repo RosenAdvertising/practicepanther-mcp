@@ -104,9 +104,7 @@ def test_create_account_omits_empty_primary_contact_and_includes_provided(client
     assert calls[1]["json"]["primary_contact"] == primary_contact
 
 
-def test_invalid_grant_refresh_persists_rotated_tokens_and_retries(
-    client, monkeypatch
-):
+def test_invalid_grant_refresh_persists_rotated_tokens_and_retries(client, monkeypatch):
     calls = []
 
     def fake_request(method, url, **kwargs):

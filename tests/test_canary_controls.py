@@ -131,7 +131,9 @@ def test_upstream_rejection_omits_pii_from_log_and_exception(client, caplog) -> 
     assert "provider returned an error" in caplog.text
 
 
-def test_missing_credentials_rejection_is_logged_without_values(monkeypatch, caplog) -> None:
+def test_missing_credentials_rejection_is_logged_without_values(
+    monkeypatch, caplog
+) -> None:
     caplog.set_level(logging.WARNING)
     monkeypatch.setattr(
         credentials,
