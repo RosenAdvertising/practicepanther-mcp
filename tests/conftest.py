@@ -47,15 +47,17 @@ def token_env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     for key in keys:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv(credentials.CONFIG_DIR_ENV, str(tmp_path))
-    credentials.save_values(
-        {
-            "PP_CLIENT_ID": "client-id",
-            "PP_CLIENT_SECRET": "client-secret",
-            "PP_REDIRECT_URI": credentials.DEFAULT_REDIRECT_URI,
-            "PP_ACCESS_TOKEN": "old-access",
-            "PP_REFRESH_TOKEN": "old-refresh",
-        }
-    )
+    # Keep fake test credentials in the process environment. Writing them to
+    # the fixture's .env makes tests that delete environment keys reload them
+    # through the intentionally enabled dotenv path.
+    for key, value in {
+        "PP_CLIENT_ID": "client-id",
+        "PP_CLIENT_SECRET": "client-secret",
+        "PP_REDIRECT_URI": credentials.DEFAULT_REDIRECT_URI,
+        "PP_ACCESS_TOKEN": "old-access",
+        "PP_REFRESH_TOKEN": "old-refresh",
+    }.items():
+        monkeypatch.setenv(key, value)
     yield tmp_path
     for key in keys:
         os.environ.pop(key, None)
