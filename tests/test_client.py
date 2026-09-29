@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 
 from practicepanther_mcp import credentials
-from practicepanther_mcp.client import REAUTH_MESSAGE
 
 from conftest import DummyResponse
 
@@ -161,7 +160,7 @@ def test_refresh_failure_raises_rerun_setup_error(client, monkeypatch):
 
     with pytest.raises(RuntimeError, match="practicepanther-mcp-setup") as exc:
         client.get("/users/me")
-    assert REAUTH_MESSAGE in str(exc.value)
+    assert "Re-run setup with: practicepanther-mcp-setup" in str(exc.value)
 
 
 def test_fetch_merge_put_overlay_logic(client):

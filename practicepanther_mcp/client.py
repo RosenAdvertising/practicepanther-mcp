@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import logging
+import math
 import sys
 import time
 from typing import Any
 
 import requests
+from mcp.server.mcpserver.exceptions import ToolError
 
 from practicepanther_mcp import credentials
 
@@ -29,6 +31,43 @@ TAG_TYPES = {"account", "matter", "activity"}
 logger = logging.getLogger(__name__)
 
 
+class MissingCredentialsError(ToolError, RuntimeError):
+    pass
+
+
+class ReauthorizationError(ToolError, RuntimeError):
+    pass
+
+
+class VendorRequestError(ToolError, RuntimeError):
+    pass
+
+
+class RateLimitError(ToolError, RuntimeError):
+    pass
+
+
+class ArgumentError(ToolError, ValueError):
+    pass
+
+
+class ResourceNotFoundError(ToolError, RuntimeError):
+    pass
+
+
+_SAFE_VENDOR_REASONS = {
+    "invalid_grant": "authorization expired",
+    "unauthorized": "authorization rejected",
+    "forbidden": "access denied",
+    "not_found": "record not found",
+    "resource_not_found": "record not found",
+    "rate_limit_exceeded": "rate limit exceeded",
+    "invalid_request": "invalid request",
+    "validation_error": "invalid request",
+    "service_unavailable": "service unavailable",
+}
+
+
 def _json_response(resp: requests.Response) -> Any:
     try:
         return resp.json()
@@ -40,8 +79,8 @@ def _json_response(resp: requests.Response) -> Any:
                 "status_code": resp.status_code,
             },
         )
-        raise RuntimeError(
-            f"PracticePanther API returned non-JSON ({resp.status_code})"
+        raise VendorRequestError(
+            f"PracticePanther request failed (HTTP {resp.status_code}: response was not valid JSON)."
         ) from exc
 
 
@@ -49,10 +88,30 @@ def _retry_after_seconds(resp: requests.Response, attempt: int) -> float:
     retry_after = resp.headers.get("Retry-After")
     if retry_after:
         try:
-            return float(retry_after)
-        except ValueError:
+            value = float(retry_after)
+            if math.isfinite(value):
+                return min(60.0, max(0.0, value))
+            if value > 0:
+                return 60.0
+        except (ValueError, TypeError, OverflowError):
             pass
-    return float(2**attempt)
+    return min(60.0, float(2**attempt))
+
+
+def _safe_vendor_reason(resp: requests.Response) -> str:
+    try:
+        body = resp.json()
+    except (ValueError, TypeError):
+        return "request rejected"
+    if isinstance(body, dict):
+        error = body.get("error")
+        candidates = [error, body.get("code")]
+        if isinstance(error, dict):
+            candidates.append(error.get("code"))
+        for code in candidates:
+            if isinstance(code, str) and code.lower() in _SAFE_VENDOR_REASONS:
+                return _SAFE_VENDOR_REASONS[code.lower()]
+    return "request rejected"
 
 
 def _ref(resource_id: str) -> dict[str, str]:
@@ -80,7 +139,9 @@ def _validate(value: str, allowed: set[str], field_name: str) -> None:
             },
         )
         valid = ", ".join(sorted(allowed))
-        raise ValueError(f"{field_name} must be one of: {valid}")
+        raise ArgumentError(
+            f"Invalid argument '{field_name}'; expected one of: {valid}."
+        )
 
 
 def _compact(values: dict[str, Any]) -> dict[str, Any]:
@@ -109,8 +170,8 @@ class PracticePantherClient:
                 "Rejected PracticePanther client initialization: credentials incomplete",
                 extra={"event": "practicepanther_credentials_rejected"},
             )
-            raise RuntimeError(
-                "PracticePanther credentials not found. Run: practicepanther-mcp-setup"
+            raise MissingCredentialsError(
+                "PracticePanther credentials are missing. Set PP_CLIENT_ID, PP_CLIENT_SECRET, PP_ACCESS_TOKEN, and PP_REFRESH_TOKEN, or run: practicepanther-mcp-setup"
             )
 
         self.session = requests.Session()
@@ -135,7 +196,7 @@ class PracticePantherClient:
             body = resp.json()
         except ValueError:
             return False
-        return body.get("error") == "invalid_grant"
+        return isinstance(body, dict) and body.get("error") == "invalid_grant"
 
     def _refresh_tokens(self) -> None:
         resp = requests.post(
@@ -157,9 +218,24 @@ class PracticePantherClient:
                     "status_code": resp.status_code,
                 },
             )
-            raise RuntimeError(f"{REAUTH_MESSAGE}. Status: {resp.status_code}.")
+            if resp.status_code in (400, 401, 403):
+                raise ReauthorizationError(
+                    "PracticePanther authorization failed. Re-run setup with: practicepanther-mcp-setup"
+                )
+            if resp.status_code == 429:
+                wait = _retry_after_seconds(resp, 0)
+                raise RateLimitError(
+                    f"PracticePanther rate limit reached. Retry after {wait:g} seconds."
+                )
+            raise VendorRequestError(
+                f"PracticePanther request failed (HTTP {resp.status_code}: {_safe_vendor_reason(resp)})."
+            )
 
         token_data = _json_response(resp)
+        if not isinstance(token_data, dict):
+            raise ReauthorizationError(
+                "PracticePanther authorization failed. Re-run setup with: practicepanther-mcp-setup"
+            )
         access_token = token_data.get("access_token", "")
         refresh_token = token_data.get("refresh_token", "")
         if not access_token or not refresh_token:
@@ -167,7 +243,9 @@ class PracticePantherClient:
                 "Rejected PracticePanther OAuth refresh: token response was incomplete",
                 extra={"event": "practicepanther_oauth_refresh_rejected"},
             )
-            raise RuntimeError(f"{REAUTH_MESSAGE}. Token response was incomplete.")
+            raise ReauthorizationError(
+                "PracticePanther authorization failed. Re-run setup with: practicepanther-mcp-setup"
+            )
 
         credentials.save_values(
             {
@@ -198,15 +276,19 @@ class PracticePantherClient:
             timeout=30,
         )
 
-        if self._is_invalid_grant(resp) and retry_auth:
-            self._refresh_tokens()
-            return self._request(
-                method,
-                path,
-                params=params,
-                json_body=json_body,
-                retry_auth=False,
-                rate_retries=rate_retries,
+        if self._is_invalid_grant(resp):
+            if retry_auth:
+                self._refresh_tokens()
+                return self._request(
+                    method,
+                    path,
+                    params=params,
+                    json_body=json_body,
+                    retry_auth=False,
+                    rate_retries=rate_retries,
+                )
+            raise ReauthorizationError(
+                "PracticePanther authorization was rejected. Re-run setup with: practicepanther-mcp-setup"
             )
 
         if resp.status_code == 429 and rate_retries < 3:
@@ -222,6 +304,12 @@ class PracticePantherClient:
                 rate_retries=rate_retries + 1,
             )
 
+        if resp.status_code == 429:
+            wait = _retry_after_seconds(resp, rate_retries)
+            raise RateLimitError(
+                f"PracticePanther rate limit reached. Retry after {wait:g} seconds."
+            )
+
         if not resp.ok:
             logger.warning(
                 "Rejected PracticePanther API request: provider returned an error",
@@ -230,7 +318,18 @@ class PracticePantherClient:
                     "status_code": resp.status_code,
                 },
             )
-            raise RuntimeError(f"PracticePanther API error {resp.status_code}")
+            reason = _safe_vendor_reason(resp)
+            if resp.status_code in {401, 403}:
+                raise ReauthorizationError(
+                    "PracticePanther authorization was rejected. Re-run setup with: practicepanther-mcp-setup"
+                )
+            if resp.status_code == 404:
+                raise ResourceNotFoundError(
+                    "PracticePanther record was not found (HTTP 404). Check the record ID."
+                )
+            raise VendorRequestError(
+                f"PracticePanther request failed (HTTP {resp.status_code}: {reason})."
+            )
 
         if resp.status_code == 204 or not resp.text:
             return {"success": True}
@@ -261,13 +360,17 @@ class PracticePantherClient:
                 "Rejected PracticePanther list request: top is outside allowed range",
                 extra={"event": "practicepanther_list_validation_rejected"},
             )
-            raise ValueError("top must be between 1 and 200")
+            raise ArgumentError(
+                "Invalid argument 'top'; expected an integer from 1 to 200."
+            )
         if skip < 0:
             logger.warning(
                 "Rejected PracticePanther list request: skip is negative",
                 extra={"event": "practicepanther_list_validation_rejected"},
             )
-            raise ValueError("skip must be zero or greater")
+            raise ArgumentError(
+                "Invalid argument 'skip'; expected an integer zero or greater."
+            )
         params: dict[str, Any] = {"$top": top, "$skip": skip}
         if order_by:
             params["$orderby"] = order_by

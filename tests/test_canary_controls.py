@@ -95,7 +95,9 @@ def test_list_request_forwards_total_top_skip_and_custom_order(client) -> None:
 def test_rejected_list_limit_has_pii_free_reason_log(client, caplog) -> None:
     caplog.set_level(logging.WARNING)
 
-    with pytest.raises(ValueError, match="top must be between 1 and 200"):
+    with pytest.raises(
+        ValueError, match="Invalid argument.*top.*integer from 1 to 200"
+    ):
         client.list_notes(top=201)
 
     assert "Rejected PracticePanther list request" in caplog.text
@@ -123,7 +125,7 @@ def test_upstream_rejection_omits_pii_from_log_and_exception(client, caplog) -> 
 
     client.session.request = fake_request
 
-    with pytest.raises(RuntimeError, match="PracticePanther API error 403") as exc:
+    with pytest.raises(RuntimeError, match="authorization was rejected") as exc:
         client.get("/users/me")
 
     assert upstream_pii not in caplog.text
@@ -141,7 +143,7 @@ def test_missing_credentials_rejection_is_logged_without_values(
         lambda: credentials.PracticePantherCredentials("", "", "", "", ""),
     )
 
-    with pytest.raises(RuntimeError, match="credentials not found"):
+    with pytest.raises(RuntimeError, match="credentials are missing"):
         PracticePantherClient()
 
     assert "credentials incomplete" in caplog.text

@@ -4,12 +4,33 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Annotated, Any
 
+import requests
 from mcp.server import MCPServer
+from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+from mcp.server.context import ServerRequestContext
+from mcp.shared.exceptions import MCPError
+from mcp_types import (
+    CallToolRequestParams,
+    CallToolResult,
+    InputRequiredResult,
+    TextContent,
+)
+from pydantic import ValidationError
 from pydantic import Field
 
-from practicepanther_mcp.client import PracticePantherClient
+from practicepanther_mcp.client import (
+    ArgumentError,
+    MissingCredentialsError,
+    PracticePantherClient,
+    RateLimitError,
+    ReauthorizationError,
+    ResourceNotFoundError,
+    VendorRequestError,
+)
 
 ListTop = Annotated[
     int,
@@ -29,7 +50,97 @@ OrderBy = Annotated[
 ]
 
 
-mcp = MCPServer(
+_logger = logging.getLogger(__name__)
+
+
+def _expected_shape(spec: dict[str, Any]) -> str:
+    if "anyOf" in spec:
+        return " or ".join(_expected_shape(option) for option in spec["anyOf"])
+    expected = str(spec.get("type", "the documented shape"))
+    if "minimum" in spec and "maximum" in spec:
+        expected += f" from {spec['minimum']} to {spec['maximum']}"
+    elif "minimum" in spec:
+        expected += f" >= {spec['minimum']}"
+    elif "maximum" in spec:
+        expected += f" <= {spec['maximum']}"
+    return expected
+
+
+class SafeMCPServer(MCPServer):
+    """Keep expected failures actionable and unexpected failures opaque."""
+
+    def _argument_failure(self, name: str, exc: ValidationError) -> str:
+        tool = self._tool_manager.get_tool(name)
+        schema = tool.parameters.get("properties", {}) if tool else {}
+        safe_names = set(schema)
+        errors = exc.errors(include_input=False, include_url=False)
+        for error in errors:
+            location = error.get("loc", ())
+            field = location[0] if location and location[0] in safe_names else None
+            if field is not None:
+                spec = schema[field]
+                expected = _expected_shape(spec)
+                if error.get("type") == "missing":
+                    expected = f"a required {expected}"
+                return f"Invalid argument '{field}'; expected {expected}."
+        return "Invalid arguments; use the documented input schema."
+
+    async def _handle_call_tool(
+        self, ctx: ServerRequestContext, params: CallToolRequestParams
+    ) -> CallToolResult | InputRequiredResult:
+        try:
+            return await self.call_tool(
+                params.name,
+                params.arguments or {},
+                context=Context(
+                    request_context=ctx,
+                    mcp_server=self,
+                    input_params=params,
+                    subscriptions=self._subscriptions,
+                ),
+            )
+        except MCPError:
+            raise
+        except Exception as exc:
+            cause = (
+                exc.__cause__ if isinstance(exc, ToolError) and exc.__cause__ else exc
+            )
+            if (
+                isinstance(exc, ToolError)
+                and not isinstance(exc, UnexpectedToolError)
+                and isinstance(cause, ValidationError)
+            ):
+                message = self._argument_failure(params.name, cause)
+                _logger.info("tool_call_failed reason=argument_validation")
+            elif isinstance(
+                cause,
+                (
+                    MissingCredentialsError,
+                    ReauthorizationError,
+                    VendorRequestError,
+                    RateLimitError,
+                    ArgumentError,
+                    ResourceNotFoundError,
+                ),
+            ):
+                message = str(cause)
+                _logger.info("tool_call_failed reason=anticipated")
+            elif isinstance(cause, requests.Timeout):
+                message = "PracticePanther request timed out. Retry shortly."
+                _logger.info("tool_call_failed reason=timeout")
+            elif isinstance(cause, requests.ConnectionError):
+                message = "Could not connect to PracticePanther. Check connectivity and retry."
+                _logger.info("tool_call_failed reason=connection")
+            else:
+                tool = self._tool_manager.get_tool(params.name)
+                message = f"Error executing tool {params.name if tool else 'unknown'}"
+                _logger.error("tool_call_failed reason=unexpected")
+            return CallToolResult(
+                content=[TextContent(type="text", text=message)], is_error=True
+            )
+
+
+mcp = SafeMCPServer(
     "practicepanther-mcp",
     instructions=(
         "Access PracticePanther matters, accounts, contacts, tasks, calendar, "

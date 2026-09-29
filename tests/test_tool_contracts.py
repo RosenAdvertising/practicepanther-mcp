@@ -925,7 +925,7 @@ def test_non_200_error_omits_upstream_response_body(client: Any) -> None:
 
     client.session.request = fake_request
 
-    with pytest.raises(RuntimeError, match="PracticePanther API error 500") as exc:
+    with pytest.raises(RuntimeError, match="HTTP 500: request rejected") as exc:
         client.get("/users/me")
     assert "upstream exploded" not in str(exc.value)
 
