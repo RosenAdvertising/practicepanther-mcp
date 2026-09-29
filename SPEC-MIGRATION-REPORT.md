@@ -45,10 +45,14 @@ behavior. They do not establish live API behavior or deployed transport
 behavior. The lock checks SDK 2.2.0; other versions permitted by the range
 have not been tested here.
 
-## Open product decision
+## Error behavior
 
-MCP 2.2.0 masks client-visible messages from tool exceptions other than
-`ToolError` or `ResourceError`. Keeping that masking limits leakage from
-provider and validation failures; explicitly safe `ToolError` messages could
-give clients more actionable feedback. Toby should decide which errors, if any,
-merit safe client-visible messages. Existing exception handling is unchanged.
+Tool calls return expected credential, authorization, validation, not-found,
+vendor rejection, rate-limit, and transport failures as MCP tool errors. The
+server exposes only fixed or explicitly safe client messages; unexpected
+exception text and provider response prose are masked. Resource read failures
+are converted to safe resource errors before the SDK logs them. Timeout and
+connection failures for writes explain that completion is unknown and advise
+checking the result before retrying; read failures can be retried. HTTP 403
+reports missing account permission or expired authorization, while HTTP 401
+directs the user to reauthorize.

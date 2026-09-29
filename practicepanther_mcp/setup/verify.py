@@ -39,8 +39,40 @@ def check_api() -> bool:
         print(f"Accounts readable: {account_count} returned (limit 1)")
         print(f"Matters readable: {matter_count} returned (limit 1)")
         return True
-    except Exception as exc:  # noqa: BLE001 - CLI should surface any failure
-        print(f"API check failed: {exc}")
+    except Exception as exc:  # noqa: BLE001 - CLI must not expose unknown errors
+        from practicepanther_mcp.client import (
+            ArgumentError,
+            MissingCredentialsError,
+            RateLimitError,
+            ReauthorizationError,
+            ResourceNotFoundError,
+            TransportError,
+            VendorRequestError,
+        )
+
+        safe_errors = (
+            ArgumentError,
+            MissingCredentialsError,
+            RateLimitError,
+            ReauthorizationError,
+            ResourceNotFoundError,
+            TransportError,
+            VendorRequestError,
+        )
+        if isinstance(exc, safe_errors):
+            if isinstance(exc, TransportError):
+                detail = (
+                    "Could not connect to PracticePanther; check connectivity and "
+                    "retry verification."
+                )
+            else:
+                detail = str(exc)
+        else:
+            detail = (
+                "Could not connect to PracticePanther; check connectivity and "
+                "retry verification."
+            )
+        print(f"API check failed: {detail}")
         return False
 
 

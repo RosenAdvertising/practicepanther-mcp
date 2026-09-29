@@ -125,7 +125,7 @@ def test_upstream_rejection_omits_pii_from_log_and_exception(client, caplog) -> 
 
     client.session.request = fake_request
 
-    with pytest.raises(RuntimeError, match="authorization was rejected") as exc:
+    with pytest.raises(RuntimeError, match="PracticePanther access denied") as exc:
         client.get("/users/me")
 
     assert upstream_pii not in caplog.text

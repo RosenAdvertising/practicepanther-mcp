@@ -26,6 +26,28 @@ def test_bearer_header_on_requests(client):
     assert client.get("/users/me") == {"ok": True}
     assert calls[0]["headers"]["Authorization"] == "Bearer old-access"
     assert calls[0]["headers"]["Accept"] == "application/json"
+    assert calls[0]["kwargs"]["timeout"] == 30
+
+
+@pytest.mark.parametrize(
+    ("resource_id", "escaped"),
+    [
+        ("../x", "..%2Fx"),
+        ("a?b", "a%3Fb"),
+        ("a#b", "a%23b"),
+        ("a/b", "a%2Fb"),
+    ],
+)
+def test_string_path_ids_are_percent_encoded_as_one_segment(
+    client, resource_id, escaped
+):
+    urls = []
+    client.session.request = lambda _method, url, **_kwargs: (
+        urls.append(url) or DummyResponse(200, {"id": resource_id})
+    )
+    client.get_matter(resource_id)
+    assert urls[0].endswith(f"/matters/{escaped}")
+    assert "/matters/../" not in urls[0]
 
 
 def test_odata_params_serialized(client):

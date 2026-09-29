@@ -55,7 +55,7 @@ def test_missing_credentials_is_actionable_and_error(token_env, monkeypatch):
         (
             403,
             {"error": "forbidden"},
-            "PracticePanther authorization was rejected. Re-run setup with: practicepanther-mcp-setup",
+            "PracticePanther access denied: the connected account lacks permission for this action (or the authorization expired; re-run practicepanther-mcp-setup if so).",
         ),
         (
             404,
@@ -233,11 +233,11 @@ def test_repeated_invalid_grant_requires_reauthorization(client, monkeypatch):
     [
         (
             requests.Timeout("PRIVATE"),
-            "PracticePanther request timed out. Retry shortly.",
+            "PracticePanther request timed out. This read can be retried.",
         ),
         (
             requests.ConnectionError("PRIVATE"),
-            "Could not connect to PracticePanther. Check connectivity and retry.",
+            "Could not connect to PracticePanther. This read can be retried.",
         ),
         (ValueError("PRIVATE"), "Error executing tool get_current_user"),
         (ToolError("PRIVATE"), "Error executing tool get_current_user"),
@@ -285,7 +285,7 @@ def test_local_enum_validation_is_actionable(client, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("header", "seconds"), [("90", "60"), ("NaN", "8"), ("-2", "0"), ("1.5", "1.5")]
+    ("header", "seconds"), [("90", "90"), ("NaN", "8"), ("-2", "0"), ("1.5", "1.5")]
 )
 def test_numeric_retry_hints_are_bounded(client, monkeypatch, header, seconds):
     from practicepanther_mcp import server
@@ -304,6 +304,53 @@ def test_numeric_retry_hints_are_bounded(client, monkeypatch, header, seconds):
     )
 
 
+def test_retry_after_aggregate_wait_is_capped_without_shortening_hint(
+    client, monkeypatch
+):
+    from practicepanther_mcp import server
+    import practicepanther_mcp.client as client_module
+
+    calls = []
+    sleeps = []
+
+    def fake_request(method, *_args, **_kwargs):
+        calls.append(1)
+        if len(calls) in {1, 3}:
+            return DummyResponse(429, {}, headers={"Retry-After": "35"})
+        return DummyResponse(200, {"id": "matter-1", "name": "Old"})
+
+    client.session.request = fake_request
+    monkeypatch.setattr(client_module.time, "sleep", sleeps.append)
+    monkeypatch.setattr(server, "_client", lambda: client)
+    result = _call(
+        "update_matter", {"matter_id": "matter-1", "matter_data": {"name": "New"}}
+    )
+    assert result.is_error is True
+    assert (
+        result.content[0].text
+        == "PracticePanther rate limit reached. Retry after 35 seconds."
+    )
+    assert sleeps == [35.0]
+    assert len(calls) == 3
+
+
+def test_request_timeout_is_set_for_oauth_refresh(client, monkeypatch):
+    refresh_calls = []
+
+    def fake_request(*_args, **_kwargs):
+        return DummyResponse(400, {"error": "invalid_grant"})
+
+    def fake_post(*_args, **kwargs):
+        refresh_calls.append(kwargs)
+        return DummyResponse(400, {"error": "invalid_grant"})
+
+    client.session.request = fake_request
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(Exception):
+        client.get("/users/me")
+    assert refresh_calls[0]["timeout"] == 30
+
+
 def test_invalid_json_response_has_safe_reason(client, monkeypatch, caplog):
     from practicepanther_mcp import server
 
@@ -316,3 +363,208 @@ def test_invalid_json_response_has_safe_reason(client, monkeypatch, caplog):
         == "PracticePanther request failed (HTTP 200: response was not valid JSON)."
     )
     assert "PRIVATE" not in caplog.text
+
+
+def test_empty_failure_body_is_not_reported_as_success(client):
+    from practicepanther_mcp import server
+
+    client.session.request = lambda *a, **k: DummyResponse(
+        500, None, text="PRIVATE_EMPTY_BODY_SENTINEL"
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(server, "_client", lambda: client)
+    try:
+        result = _call("get_current_user", {})
+    finally:
+        monkeypatch.undo()
+    assert result.is_error is True
+    assert (
+        result.content[0].text
+        == "PracticePanther request failed (HTTP 500: request rejected)."
+    )
+    assert "PRIVATE_EMPTY_BODY_SENTINEL" not in result.content[0].text
+
+
+@pytest.mark.parametrize(
+    "error", [requests.Timeout("hidden"), requests.ConnectionError("hidden")]
+)
+def test_write_transport_error_warns_outcome_is_unknown(client, monkeypatch, error):
+    from practicepanther_mcp import server
+
+    client.session.request = lambda *a, **k: (_ for _ in ()).throw(error)
+    monkeypatch.setattr(server, "_client", lambda: client)
+    result = _call("create_account", {"display_name": "Example"})
+    assert result.is_error is True
+    expected_prefix = (
+        "PracticePanther request timed out."
+        if isinstance(error, requests.Timeout)
+        else "Could not connect to PracticePanther."
+    )
+    assert result.content[0].text == (
+        expected_prefix
+        + " The outcome of this write is unknown; check whether it completed before retrying."
+    )
+    assert "hidden" not in result.content[0].text
+
+
+def test_resource_unknown_failure_is_masked_before_sdk_logging(
+    token_env, monkeypatch, caplog
+):
+    import logging
+    from mcp_types import ReadResourceRequestParams
+    from practicepanther_mcp.server import mcp
+
+    sentinel = "RESOURCE_PRIVATE_SENTINEL"
+
+    def fail():
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr("practicepanther_mcp.server._client", fail)
+    caplog.set_level(logging.INFO)
+    with pytest.raises(Exception) as caught:
+        asyncio.run(
+            mcp._handle_read_resource(
+                cast(Any, None),
+                ReadResourceRequestParams(uri="practicepanther://users"),
+            )
+        )
+    assert sentinel not in str(caught.value)
+    assert sentinel not in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+def test_verify_entrypoint_without_credentials_is_actionable(
+    token_env, monkeypatch, capsys
+):
+    from practicepanther_mcp import credentials
+    from practicepanther_mcp.setup import verify
+
+    for key in credentials.KNOWN_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(credentials, "_parse_env_file", lambda *args: {})
+    with pytest.raises(SystemExit) as exited:
+        verify.main()
+    output = capsys.readouterr().out
+    assert exited.value.code == 1
+    assert "Missing PracticePanther config" in output
+    assert "practicepanther-mcp-setup" in output
+    assert "Traceback" not in output
+
+
+def test_verify_entrypoint_fake_bad_key_is_actionable(token_env, monkeypatch, capsys):
+    from practicepanther_mcp import client as client_module
+    from practicepanther_mcp.setup import verify
+
+    class FakeBadKeyClient:
+        def __init__(self):
+            pass
+
+        def get_current_user(self):
+            from practicepanther_mcp.client import ReauthorizationError
+
+            raise ReauthorizationError(
+                "PracticePanther authorization was rejected. Re-run setup with: practicepanther-mcp-setup"
+            )
+
+    monkeypatch.setattr(client_module, "PracticePantherClient", FakeBadKeyClient)
+    with pytest.raises(SystemExit) as exited:
+        verify.main()
+    output = capsys.readouterr().out
+    assert exited.value.code == 1
+    assert "authorization was rejected" in output
+    assert "practicepanther-mcp-setup" in output
+    assert "Traceback" not in output
+
+
+def test_setup_entrypoint_empty_input_fails_without_authorize_url(monkeypatch, capsys):
+    from practicepanther_mcp.setup import setup
+
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+    with pytest.raises(SystemExit) as exited:
+        setup.main()
+    output = capsys.readouterr().out
+    assert exited.value.code == 1
+    assert "Client ID is required" in output
+    assert "oauth/authorize" not in output
+    assert "Traceback" not in output
+
+
+def test_setup_entrypoint_eof_fails_clearly(monkeypatch, capsys):
+    from practicepanther_mcp.setup import setup
+
+    def eof(_prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", eof)
+    with pytest.raises(SystemExit) as exited:
+        setup.main()
+    output = capsys.readouterr().out
+    assert exited.value.code == 1
+    assert "input ended" in output
+    assert "Traceback" not in output
+
+
+def test_setup_entrypoint_fake_bad_key_has_safe_failure(monkeypatch, capsys):
+    from practicepanther_mcp.setup import setup
+
+    answers = iter(["fake-client", "http://localhost/callback", "fake-code"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": "fake-secret")
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(kwargs)
+        return DummyResponse(401, {"message": "PRIVATE_VENDOR_BODY"})
+
+    monkeypatch.setattr(setup.requests, "post", fake_post)
+    with pytest.raises(SystemExit) as exited:
+        setup.main()
+    output = capsys.readouterr().out
+    assert exited.value.code == 1
+    assert "Token exchange failed (401)" in output
+    assert "PRIVATE_VENDOR_BODY" not in output
+    assert "Traceback" not in output
+    assert calls[0]["timeout"] == 30
+
+
+def test_unexpected_outer_exception_does_not_expose_safe_cause(monkeypatch):
+    from practicepanther_mcp import server
+    from practicepanther_mcp.client import MissingCredentialsError
+
+    def fail():
+        raise RuntimeError("PRIVATE_OUTER") from MissingCredentialsError(
+            "PRIVATE_CAUSE"
+        )
+
+    monkeypatch.setattr(server, "_client", fail)
+    result = _call("get_current_user", {})
+    assert result.is_error is True
+    assert result.content[0].text == "Error executing tool get_current_user"
+
+
+@pytest.mark.parametrize("failure", [requests.Timeout, requests.ConnectionError])
+def test_setup_transport_failure_warns_of_unknown_outcome(monkeypatch, capsys, failure):
+    from practicepanther_mcp.setup import setup
+
+    answers = iter(["fake-client", "", "fake-code"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": "fake-secret")
+    monkeypatch.setattr(
+        setup.requests,
+        "post",
+        lambda *a, **k: (_ for _ in ()).throw(failure("PRIVATE")),
+    )
+    with pytest.raises(SystemExit) as stopped:
+        setup.main()
+    output = capsys.readouterr().out
+    expected = (
+        "Token exchange timed out"
+        if failure is requests.Timeout
+        else "Token exchange lost its connection"
+    )
+    assert stopped.value.code == 1
+    assert output.endswith(
+        expected
+        + "; the outcome is unknown. Check whether authorization completed before retrying setup.\n"
+    )
+    assert "PRIVATE" not in output

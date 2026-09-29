@@ -7,14 +7,17 @@ import json
 import logging
 from typing import Annotated, Any
 
-import requests
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
-from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
-from mcp.server.context import ServerRequestContext
+from mcp.server.mcpserver.exceptions import (
+    ResourceError,
+    ResourceNotFoundError as MCPResourceNotFoundError,
+    ToolError,
+    UnexpectedToolError,
+    UnexpectedResourceError,
+)
 from mcp.shared.exceptions import MCPError
 from mcp_types import (
-    CallToolRequestParams,
     CallToolResult,
     InputRequiredResult,
     TextContent,
@@ -29,6 +32,7 @@ from practicepanther_mcp.client import (
     RateLimitError,
     ReauthorizationError,
     ResourceNotFoundError,
+    TransportError,
     VendorRequestError,
 )
 
@@ -66,6 +70,22 @@ def _expected_shape(spec: dict[str, Any]) -> str:
     return expected
 
 
+def _sdk_cause(exc: BaseException) -> BaseException:
+    """Unwrap SDK wrappers without traversing arbitrary exception causes."""
+    seen = set()
+    while type(exc) in (
+        ToolError,
+        UnexpectedToolError,
+        ResourceError,
+        UnexpectedResourceError,
+    ):
+        if exc.__cause__ is None or id(exc) in seen:
+            break
+        seen.add(id(exc))
+        exc = exc.__cause__
+    return exc
+
+
 class SafeMCPServer(MCPServer):
     """Keep expected failures actionable and unexpected failures opaque."""
 
@@ -85,32 +105,21 @@ class SafeMCPServer(MCPServer):
                 return f"Invalid argument '{field}'; expected {expected}."
         return "Invalid arguments; use the documented input schema."
 
-    async def _handle_call_tool(
-        self, ctx: ServerRequestContext, params: CallToolRequestParams
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Context | None = None
     ) -> CallToolResult | InputRequiredResult:
         try:
-            return await self.call_tool(
-                params.name,
-                params.arguments or {},
-                context=Context(
-                    request_context=ctx,
-                    mcp_server=self,
-                    input_params=params,
-                    subscriptions=self._subscriptions,
-                ),
-            )
-        except MCPError:
+            return await super().call_tool(name, arguments, context)
+        except (MCPError, MCPResourceNotFoundError):
             raise
         except Exception as exc:
-            cause = (
-                exc.__cause__ if isinstance(exc, ToolError) and exc.__cause__ else exc
-            )
+            cause = _sdk_cause(exc)
             if (
                 isinstance(exc, ToolError)
                 and not isinstance(exc, UnexpectedToolError)
                 and isinstance(cause, ValidationError)
             ):
-                message = self._argument_failure(params.name, cause)
+                message = self._argument_failure(name, cause)
                 _logger.info("tool_call_failed reason=argument_validation")
             elif isinstance(
                 cause,
@@ -125,19 +134,48 @@ class SafeMCPServer(MCPServer):
             ):
                 message = str(cause)
                 _logger.info("tool_call_failed reason=anticipated")
-            elif isinstance(cause, requests.Timeout):
-                message = "PracticePanther request timed out. Retry shortly."
+            elif isinstance(cause, TransportError):
+                is_write = cause.method not in {"GET", "HEAD", "OPTIONS"}
+                if is_write:
+                    action = "The outcome of this write is unknown; check whether it completed before retrying."
+                else:
+                    action = "This read can be retried."
+                if cause.timed_out:
+                    message = f"PracticePanther request timed out. {action}"
+                else:
+                    message = f"Could not connect to PracticePanther. {action}"
                 _logger.info("tool_call_failed reason=timeout")
-            elif isinstance(cause, requests.ConnectionError):
-                message = "Could not connect to PracticePanther. Check connectivity and retry."
-                _logger.info("tool_call_failed reason=connection")
             else:
-                tool = self._tool_manager.get_tool(params.name)
-                message = f"Error executing tool {params.name if tool else 'unknown'}"
+                tool = self._tool_manager.get_tool(name)
+                message = f"Error executing tool {name if tool else 'unknown'}"
                 _logger.error("tool_call_failed reason=unexpected")
             return CallToolResult(
                 content=[TextContent(type="text", text=message)], is_error=True
             )
+
+    async def read_resource(self, uri: Any, context: Context | None = None) -> Any:
+        try:
+            return await super().read_resource(uri, context)
+        except (MCPError, MCPResourceNotFoundError):
+            raise
+        except Exception as exc:
+            cause = _sdk_cause(exc)
+            if isinstance(
+                cause,
+                (
+                    MissingCredentialsError,
+                    ReauthorizationError,
+                    VendorRequestError,
+                    RateLimitError,
+                    ArgumentError,
+                    ResourceNotFoundError,
+                ),
+            ):
+                message = str(cause)
+            else:
+                message = "PracticePanther resource read failed."
+            _logger.info("resource_read_failed reason=safe_failure")
+            raise ResourceError(message) from None
 
 
 mcp = SafeMCPServer(

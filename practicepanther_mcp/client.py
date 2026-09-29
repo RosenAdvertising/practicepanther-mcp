@@ -7,7 +7,10 @@ import logging
 import math
 import sys
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import quote
 
 import requests
 from mcp.server.mcpserver.exceptions import ToolError
@@ -20,6 +23,11 @@ TOKEN_URL = "https://app.practicepanther.com/oauth/token"
 REAUTH_MESSAGE = (
     "PracticePanther OAuth refresh failed. Re-run setup with: "
     "practicepanther-mcp-setup"
+)
+ACCESS_DENIED_MESSAGE = (
+    "PracticePanther access denied: the connected account lacks permission for "
+    "this action (or the authorization expired; re-run "
+    "practicepanther-mcp-setup if so)."
 )
 
 TASK_PRIORITIES = {"Low", "Medium", "High"}
@@ -53,6 +61,13 @@ class ArgumentError(ToolError, ValueError):
 
 class ResourceNotFoundError(ToolError, RuntimeError):
     pass
+
+
+class TransportError(ToolError, RuntimeError):
+    def __init__(self, method: str, *, timed_out: bool) -> None:
+        super().__init__("PracticePanther request transport failed.")
+        self.method = method.upper()
+        self.timed_out = timed_out
 
 
 _SAFE_VENDOR_REASONS = {
@@ -90,11 +105,15 @@ def _retry_after_seconds(resp: requests.Response, attempt: int) -> float:
         try:
             value = float(retry_after)
             if math.isfinite(value):
-                return min(60.0, max(0.0, value))
-            if value > 0:
-                return 60.0
+                return max(0.0, value)
         except (ValueError, TypeError, OverflowError):
-            pass
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                pass
     return min(60.0, float(2**attempt))
 
 
@@ -160,6 +179,7 @@ class PracticePantherClient:
 
     def __init__(self) -> None:
         self.creds = credentials.load_credentials()
+        self._rate_waited = 0.0
         if (
             not self.creds.client_id
             or not self.creds.client_secret
@@ -199,16 +219,21 @@ class PracticePantherClient:
         return isinstance(body, dict) and body.get("error") == "invalid_grant"
 
     def _refresh_tokens(self) -> None:
-        resp = requests.post(
-            TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": self.creds.refresh_token,
-                "client_id": self.creds.client_id,
-                "client_secret": self.creds.client_secret,
-            },
-            timeout=30,
-        )
+        try:
+            resp = requests.post(
+                TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": self.creds.refresh_token,
+                    "client_id": self.creds.client_id,
+                    "client_secret": self.creds.client_secret,
+                },
+                timeout=30,
+            )
+        except requests.Timeout as exc:
+            raise TransportError("POST", timed_out=True) from exc
+        except requests.ConnectionError as exc:
+            raise TransportError("POST", timed_out=False) from exc
 
         if not resp.ok:
             logger.warning(
@@ -218,7 +243,9 @@ class PracticePantherClient:
                     "status_code": resp.status_code,
                 },
             )
-            if resp.status_code in (400, 401, 403):
+            if resp.status_code == 403:
+                raise ReauthorizationError(ACCESS_DENIED_MESSAGE)
+            if resp.status_code in (400, 401):
                 raise ReauthorizationError(
                     "PracticePanther authorization failed. Re-run setup with: practicepanther-mcp-setup"
                 )
@@ -267,14 +294,22 @@ class PracticePantherClient:
         json_body: Any = None,
         retry_auth: bool = True,
         rate_retries: int = 0,
+        rate_waited: float | None = None,
     ) -> Any:
-        resp = self.session.request(
-            method,
-            self._url(path),
-            params=params,
-            json=json_body,
-            timeout=30,
-        )
+        if rate_waited is None:
+            rate_waited = self._rate_waited
+        try:
+            resp = self.session.request(
+                method,
+                self._url(path),
+                params=params,
+                json=json_body,
+                timeout=30,
+            )
+        except requests.Timeout as exc:
+            raise TransportError(method, timed_out=True) from exc
+        except requests.ConnectionError as exc:
+            raise TransportError(method, timed_out=False) from exc
 
         if self._is_invalid_grant(resp):
             if retry_auth:
@@ -286,6 +321,7 @@ class PracticePantherClient:
                     json_body=json_body,
                     retry_auth=False,
                     rate_retries=rate_retries,
+                    rate_waited=rate_waited,
                 )
             raise ReauthorizationError(
                 "PracticePanther authorization was rejected. Re-run setup with: practicepanther-mcp-setup"
@@ -293,8 +329,13 @@ class PracticePantherClient:
 
         if resp.status_code == 429 and rate_retries < 3:
             wait = _retry_after_seconds(resp, rate_retries)
+            if rate_waited + wait > 60:
+                raise RateLimitError(
+                    f"PracticePanther rate limit reached. Retry after {wait:g} seconds."
+                )
             print(f"Rate limited. Waiting {wait:g}s...", file=sys.stderr)
             time.sleep(wait)
+            self._rate_waited = rate_waited + wait
             return self._request(
                 method,
                 path,
@@ -302,6 +343,7 @@ class PracticePantherClient:
                 json_body=json_body,
                 retry_auth=retry_auth,
                 rate_retries=rate_retries + 1,
+                rate_waited=rate_waited + wait,
             )
 
         if resp.status_code == 429:
@@ -319,10 +361,12 @@ class PracticePantherClient:
                 },
             )
             reason = _safe_vendor_reason(resp)
-            if resp.status_code in {401, 403}:
+            if resp.status_code == 401:
                 raise ReauthorizationError(
                     "PracticePanther authorization was rejected. Re-run setup with: practicepanther-mcp-setup"
                 )
+            if resp.status_code == 403:
+                raise ReauthorizationError(ACCESS_DENIED_MESSAGE)
             if resp.status_code == 404:
                 raise ResourceNotFoundError(
                     "PracticePanther record was not found (HTTP 404). Check the record ID."
@@ -377,7 +421,7 @@ class PracticePantherClient:
         return params
 
     def _merge_put(self, path: str, resource_id: str, overlay: dict[str, Any]) -> Any:
-        current = self.get(f"{path}/{resource_id}")
+        current = self.get(f"{path}/{quote(str(resource_id), safe='')}")
         if not isinstance(current, dict):
             logger.warning(
                 "Rejected PracticePanther update: current resource was not an object",
@@ -404,7 +448,7 @@ class PracticePantherClient:
         return self.get("/users", params=params)
 
     def get_user(self, user_id: str) -> Any:
-        return self.get(f"/users/{user_id}")
+        return self.get(f"/users/{quote(str(user_id), safe='')}")
 
     # Accounts
 
@@ -434,7 +478,7 @@ class PracticePantherClient:
         return self.get("/accounts", params=params)
 
     def get_account(self, account_id: str) -> Any:
-        return self.get(f"/accounts/{account_id}")
+        return self.get(f"/accounts/{quote(str(account_id), safe='')}")
 
     def create_account(
         self,
@@ -496,7 +540,7 @@ class PracticePantherClient:
         return self.get("/contacts", params=params)
 
     def get_contact(self, contact_id: str) -> Any:
-        return self.get(f"/contacts/{contact_id}")
+        return self.get(f"/contacts/{quote(str(contact_id), safe='')}")
 
     # Matters
 
@@ -528,7 +572,7 @@ class PracticePantherClient:
         return self.get("/matters", params=params)
 
     def get_matter(self, matter_id: str) -> Any:
-        return self.get(f"/matters/{matter_id}")
+        return self.get(f"/matters/{quote(str(matter_id), safe='')}")
 
     def create_matter(
         self,
@@ -599,7 +643,7 @@ class PracticePantherClient:
         return self.get("/tasks", params=params)
 
     def get_task(self, task_id: str) -> Any:
-        return self.get(f"/tasks/{task_id}")
+        return self.get(f"/tasks/{quote(str(task_id), safe='')}")
 
     def create_task(
         self,
@@ -666,7 +710,7 @@ class PracticePantherClient:
         return self.get("/events", params=params)
 
     def get_event(self, event_id: str) -> Any:
-        return self.get(f"/events/{event_id}")
+        return self.get(f"/events/{quote(str(event_id), safe='')}")
 
     def create_event(
         self,
@@ -956,8 +1000,8 @@ class PracticePantherClient:
 
     def list_custom_fields(self, field_type: str) -> Any:
         _validate(field_type, CUSTOM_FIELD_TYPES, "field_type")
-        return self.get(f"/customfields/{field_type}")
+        return self.get(f"/customfields/{quote(str(field_type), safe='')}")
 
     def list_tags(self, tag_type: str) -> Any:
         _validate(tag_type, TAG_TYPES, "tag_type")
-        return self.get(f"/tags/{tag_type}")
+        return self.get(f"/tags/{quote(str(tag_type), safe='')}")
