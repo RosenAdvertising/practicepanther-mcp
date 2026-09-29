@@ -61,10 +61,16 @@ def check_api() -> bool:
         )
         if isinstance(exc, safe_errors):
             if isinstance(exc, TransportError):
-                detail = (
-                    "Could not connect to PracticePanther; check connectivity and "
-                    "retry verification."
-                )
+                if exc.method not in {"GET", "HEAD", "OPTIONS"}:
+                    detail = (
+                        "PracticePanther authorization request failed; the outcome is unknown. "
+                        "Check whether authorization completed before retrying verification."
+                    )
+                else:
+                    detail = (
+                        "Could not connect to PracticePanther; check connectivity and "
+                        "retry verification."
+                    )
             else:
                 detail = str(exc)
         else:

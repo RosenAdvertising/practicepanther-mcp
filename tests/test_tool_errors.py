@@ -365,6 +365,21 @@ def test_invalid_json_response_has_safe_reason(client, monkeypatch, caplog):
     assert "PRIVATE" not in caplog.text
 
 
+@pytest.mark.parametrize("body", ["VENDOR_PROSE_SENTINEL", 42, True])
+def test_malformed_success_envelope_is_safe_tool_error(client, monkeypatch, body):
+    from practicepanther_mcp import server
+
+    client.session.request = lambda *a, **k: DummyResponse(200, body)
+    monkeypatch.setattr(server, "_client", lambda: client)
+    result = _call("get_current_user", {})
+    assert result.is_error is True
+    assert (
+        result.content[0].text
+        == "PracticePanther request failed (HTTP 200: response had an invalid format)."
+    )
+    assert "VENDOR_PROSE_SENTINEL" not in result.content[0].text
+
+
 def test_empty_failure_body_is_not_reported_as_success(client):
     from practicepanther_mcp import server
 
@@ -568,3 +583,22 @@ def test_setup_transport_failure_warns_of_unknown_outcome(monkeypatch, capsys, f
         + "; the outcome is unknown. Check whether authorization completed before retrying setup.\n"
     )
     assert "PRIVATE" not in output
+
+
+@pytest.mark.parametrize("timed_out", [True, False])
+def test_verify_refresh_transport_failure_preserves_unknown_outcome(
+    client, monkeypatch, capsys, timed_out
+):
+    from practicepanther_mcp import client as client_module
+    from practicepanther_mcp.setup import verify
+
+    def failed_refresh(*args, **kwargs):
+        raise client_module.TransportError("POST", timed_out=timed_out)
+
+    monkeypatch.setattr(client, "get_current_user", failed_refresh)
+    monkeypatch.setattr(client_module, "PracticePantherClient", lambda: client)
+    assert verify.check_api() is False
+    assert capsys.readouterr().out == (
+        "API check failed: PracticePanther authorization request failed; the outcome is unknown. "
+        "Check whether authorization completed before retrying verification.\n"
+    )

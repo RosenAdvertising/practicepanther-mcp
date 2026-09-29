@@ -85,7 +85,7 @@ _SAFE_VENDOR_REASONS = {
 
 def _json_response(resp: requests.Response) -> Any:
     try:
-        return resp.json()
+        body = resp.json()
     except ValueError as exc:
         logger.warning(
             "Rejected PracticePanther API response: response body was not JSON",
@@ -97,6 +97,18 @@ def _json_response(resp: requests.Response) -> Any:
         raise VendorRequestError(
             f"PracticePanther request failed (HTTP {resp.status_code}: response was not valid JSON)."
         ) from exc
+    if not isinstance(body, (dict, list)):
+        logger.warning(
+            "Rejected PracticePanther API response: response had an invalid shape",
+            extra={
+                "event": "practicepanther_api_response_rejected",
+                "status_code": resp.status_code,
+            },
+        )
+        raise VendorRequestError(
+            f"PracticePanther request failed (HTTP {resp.status_code}: response had an invalid format)."
+        )
+    return body
 
 
 def _retry_after_seconds(resp: requests.Response, attempt: int) -> float:
