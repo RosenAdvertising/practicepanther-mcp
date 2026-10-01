@@ -88,9 +88,9 @@ All credentials and tokens are stored in:
 The file is written with mode `0600`; the directory is set to `0700` when
 possible.
 
-On Windows, credential/token file storage is not supported because private-file
-writes require `os.fchmod`. This server has no OS credential-store integration;
-setup and token-refresh persistence therefore require a supported platform.
+On Windows, the file is stored in the user's profile and protected by Windows'
+default per-user access rules. On POSIX, files are created with `0600` permissions
+and writes fail closed if private permissions cannot be established.
 
 | Env var | Required | Notes |
 | --- | --- | --- |

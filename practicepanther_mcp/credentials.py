@@ -81,10 +81,11 @@ def _write_env_file(values: dict[str, str], path: Path | None = None) -> None:
 
     path = path or env_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        pass
+    if os.name != "nt":
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
 
     ordered_keys = [key for key in KNOWN_KEYS if key in values]
     ordered_keys.extend(key for key in values if key not in KNOWN_KEYS)
