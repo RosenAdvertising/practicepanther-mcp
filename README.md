@@ -88,6 +88,10 @@ All credentials and tokens are stored in:
 The file is written with mode `0600`; the directory is set to `0700` when
 possible.
 
+On Windows, credential/token file storage is not supported because private-file
+writes require `os.fchmod`. This server has no OS credential-store integration;
+setup and token-refresh persistence therefore require a supported platform.
+
 | Env var | Required | Notes |
 | --- | --- | --- |
 | `PP_CLIENT_ID` | Yes | OAuth app client ID |
