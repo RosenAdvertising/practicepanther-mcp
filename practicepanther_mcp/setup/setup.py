@@ -6,7 +6,7 @@ from __future__ import annotations
 import getpass
 import secrets
 import sys
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import requests
 
@@ -61,17 +61,38 @@ def main() -> None:
     authorize_url = f"{AUTH_URL}?{urlencode(authorize_params)}"
 
     print(
-        "\nOpen this URL in a browser, approve access, then paste the code from the redirect:"
+        "\nOpen this URL in a browser, approve access, then paste the full redirect URL:"
     )
     print(authorize_url)
     try:
-        code = input("\nAuthorization code: ").strip()
+        returned_url = input("\nFull redirect URL: ").strip()
     except EOFError:
         print("Error: Authorization code is required to finish setup.")
         sys.exit(1)
-    if not code:
-        print("Error: Authorization code is required.")
+    try:
+        returned = urlsplit(returned_url)
+        expected = urlsplit(redirect_uri)
+        params = parse_qs(returned.query, keep_blank_values=True)
+        states = params.get("state", [])
+        codes = params.get("code", [])
+        valid = (
+            (returned.scheme, returned.netloc, returned.path)
+            == (expected.scheme, expected.netloc, expected.path)
+            and not returned.fragment
+            and len(states) == 1
+            and secrets.compare_digest(states[0], state)
+            and len(codes) == 1
+            and bool(codes[0])
+            and "error" not in params
+        )
+    except (ValueError, TypeError):
+        valid = False
+    if not valid:
+        print(
+            "Error: Redirect URL must contain the matching OAuth state and authorization code."
+        )
         sys.exit(1)
+    code = codes[0]
 
     print("Exchanging authorization code for tokens...")
     try:

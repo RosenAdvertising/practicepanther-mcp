@@ -72,8 +72,8 @@ It prints an authorization URL:
 https://app.practicepanther.com/oauth/authorize?response_type=code&client_id=...&redirect_uri=...&state=...
 ```
 
-Open that URL, approve access, copy the `code` value from the redirect, and
-paste it back into the setup prompt. Setup exchanges the code at
+Open that URL, approve access, and paste the full redirect URL back into the
+setup prompt. Setup checks the returned `state` before exchanging the code at
 `https://app.practicepanther.com/oauth/token`, saves credentials and tokens, and
 runs a live verification check.
 
@@ -236,3 +236,7 @@ does not verify live PracticePanther responses or deployed transport behavior.
 ## License
 
 MIT
+
+During OAuth setup, paste the **full redirect URL**, including its `code` and
+`state` query parameters. Setup verifies that the returned state matches the
+browser authorization flow before exchanging the code. A code alone is rejected.

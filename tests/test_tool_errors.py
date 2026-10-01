@@ -6,10 +6,9 @@ from typing import Any, cast
 
 import pytest
 import requests
+from conftest import DummyResponse
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import CallToolRequestParams
-
-from conftest import DummyResponse
 
 
 def _call(name: str, arguments: dict):
@@ -23,8 +22,7 @@ def _call(name: str, arguments: dict):
 
 
 def test_missing_credentials_is_actionable_and_error(token_env, monkeypatch):
-    from practicepanther_mcp import server
-    from practicepanther_mcp import credentials
+    from practicepanther_mcp import credentials, server
 
     for key in credentials.KNOWN_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -288,8 +286,8 @@ def test_local_enum_validation_is_actionable(client, monkeypatch):
     ("header", "seconds"), [("90", "90"), ("NaN", "8"), ("-2", "0"), ("1.5", "1.5")]
 )
 def test_numeric_retry_hints_are_bounded(client, monkeypatch, header, seconds):
-    from practicepanther_mcp import server
     import practicepanther_mcp.client as client_module
+    from practicepanther_mcp import server
 
     client.session.request = lambda *a, **k: DummyResponse(
         429, {}, headers={"Retry-After": header}
@@ -307,8 +305,8 @@ def test_numeric_retry_hints_are_bounded(client, monkeypatch, header, seconds):
 def test_retry_after_aggregate_wait_is_capped_without_shortening_hint(
     client, monkeypatch
 ):
-    from practicepanther_mcp import server
     import practicepanther_mcp.client as client_module
+    from practicepanther_mcp import server
 
     calls = []
     sleeps = []
@@ -426,7 +424,9 @@ def test_resource_unknown_failure_is_masked_before_sdk_logging(
     token_env, monkeypatch, caplog
 ):
     import logging
+
     from mcp_types import ReadResourceRequestParams
+
     from practicepanther_mcp.server import mcp
 
     sentinel = "RESOURCE_PRIVATE_SENTINEL"
@@ -522,7 +522,14 @@ def test_setup_entrypoint_eof_fails_clearly(monkeypatch, capsys):
 def test_setup_entrypoint_fake_bad_key_has_safe_failure(monkeypatch, capsys):
     from practicepanther_mcp.setup import setup
 
-    answers = iter(["fake-client", "http://localhost/callback", "fake-code"])
+    monkeypatch.setattr(setup.secrets, "token_urlsafe", lambda *a: "expected")
+    answers = iter(
+        [
+            "fake-client",
+            "http://localhost/callback",
+            "http://localhost/callback?code=fake-code&state=expected",
+        ]
+    )
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     monkeypatch.setattr("getpass.getpass", lambda _prompt="": "fake-secret")
     calls = []
@@ -561,7 +568,14 @@ def test_unexpected_outer_exception_does_not_expose_safe_cause(monkeypatch):
 def test_setup_transport_failure_warns_of_unknown_outcome(monkeypatch, capsys, failure):
     from practicepanther_mcp.setup import setup
 
-    answers = iter(["fake-client", "", "fake-code"])
+    monkeypatch.setattr(setup.secrets, "token_urlsafe", lambda *a: "expected")
+    answers = iter(
+        [
+            "fake-client",
+            "",
+            "http://localhost:8123/callback?code=fake-code&state=expected",
+        ]
+    )
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     monkeypatch.setattr("getpass.getpass", lambda _prompt="": "fake-secret")
     monkeypatch.setattr(
