@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -21,8 +22,7 @@ BASE_URL = "https://app.practicepanther.com/api/v2"
 TOKEN_URL = "https://app.practicepanther.com/oauth/token"
 
 REAUTH_MESSAGE = (
-    "PracticePanther OAuth refresh failed. Re-run setup with: "
-    "practicepanther-mcp-setup"
+    "PracticePanther OAuth refresh failed. Re-run setup with: practicepanther-mcp-setup"
 )
 ACCESS_DENIED_MESSAGE = (
     "PracticePanther access denied: the connected account lacks permission for "
@@ -37,6 +37,22 @@ CALL_DIRECTIONS = {"Inbound", "Outbound"}
 CUSTOM_FIELD_TYPES = {"company", "matter", "contact"}
 TAG_TYPES = {"account", "matter", "activity"}
 logger = logging.getLogger(__name__)
+
+
+def _path_id(value, parameter: str) -> str:
+    """Validate a plain identifier before URL quoting or any HTTP request."""
+    expected = (
+        "a non-empty plain identifier (ASCII letters, digits, -, _, ., ~); not . or .."
+    )
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (str, int))
+        or str(value) in {".", ".."}
+        or re.fullmatch(r"[A-Za-z0-9._~-]+", str(value)) is None
+    ):
+        message = f"Invalid argument '{parameter}': use {expected}."
+        raise ArgumentError(message)
+    return quote(str(value), safe="")
 
 
 class MissingCredentialsError(ToolError, RuntimeError):
@@ -433,7 +449,7 @@ class PracticePantherClient:
         return params
 
     def _merge_put(self, path: str, resource_id: str, overlay: dict[str, Any]) -> Any:
-        current = self.get(f"{path}/{quote(str(resource_id), safe='')}")
+        current = self.get(f"{path}/{_path_id(resource_id, 'resource_id')}")
         if not isinstance(current, dict):
             logger.warning(
                 "Rejected PracticePanther update: current resource was not an object",
@@ -460,7 +476,7 @@ class PracticePantherClient:
         return self.get("/users", params=params)
 
     def get_user(self, user_id: str) -> Any:
-        return self.get(f"/users/{quote(str(user_id), safe='')}")
+        return self.get(f"/users/{_path_id(user_id, 'user_id')}")
 
     # Accounts
 
@@ -490,7 +506,7 @@ class PracticePantherClient:
         return self.get("/accounts", params=params)
 
     def get_account(self, account_id: str) -> Any:
-        return self.get(f"/accounts/{quote(str(account_id), safe='')}")
+        return self.get(f"/accounts/{_path_id(account_id, 'account_id')}")
 
     def create_account(
         self,
@@ -524,7 +540,9 @@ class PracticePantherClient:
         return self.post("/accounts", body)
 
     def update_account(self, account_id: str, account_data: dict[str, Any]) -> Any:
-        return self._merge_put("/accounts", account_id, account_data)
+        return self._merge_put(
+            "/accounts", _path_id(account_id, "account_id"), account_data
+        )
 
     # Contacts
 
@@ -552,7 +570,7 @@ class PracticePantherClient:
         return self.get("/contacts", params=params)
 
     def get_contact(self, contact_id: str) -> Any:
-        return self.get(f"/contacts/{quote(str(contact_id), safe='')}")
+        return self.get(f"/contacts/{_path_id(contact_id, 'contact_id')}")
 
     # Matters
 
@@ -584,7 +602,7 @@ class PracticePantherClient:
         return self.get("/matters", params=params)
 
     def get_matter(self, matter_id: str) -> Any:
-        return self.get(f"/matters/{quote(str(matter_id), safe='')}")
+        return self.get(f"/matters/{_path_id(matter_id, 'matter_id')}")
 
     def create_matter(
         self,
@@ -621,7 +639,9 @@ class PracticePantherClient:
     def update_matter(self, matter_id: str, matter_data: dict[str, Any]) -> Any:
         if "status" in matter_data:
             _validate(str(matter_data["status"]), MATTER_STATUSES, "status")
-        return self._merge_put("/matters", matter_id, matter_data)
+        return self._merge_put(
+            "/matters", _path_id(matter_id, "matter_id"), matter_data
+        )
 
     # Tasks
 
@@ -655,7 +675,7 @@ class PracticePantherClient:
         return self.get("/tasks", params=params)
 
     def get_task(self, task_id: str) -> Any:
-        return self.get(f"/tasks/{quote(str(task_id), safe='')}")
+        return self.get(f"/tasks/{_path_id(task_id, 'task_id')}")
 
     def create_task(
         self,
@@ -689,7 +709,7 @@ class PracticePantherClient:
             _validate(str(task_data["priority"]), TASK_PRIORITIES, "priority")
         if "status" in task_data:
             _validate(str(task_data["status"]), TASK_STATUSES, "status")
-        return self._merge_put("/tasks", task_id, task_data)
+        return self._merge_put("/tasks", _path_id(task_id, "task_id"), task_data)
 
     def complete_task(self, task_id: str) -> Any:
         return self.update_task(task_id, {"status": "Completed"})
@@ -722,7 +742,7 @@ class PracticePantherClient:
         return self.get("/events", params=params)
 
     def get_event(self, event_id: str) -> Any:
-        return self.get(f"/events/{quote(str(event_id), safe='')}")
+        return self.get(f"/events/{_path_id(event_id, 'event_id')}")
 
     def create_event(
         self,
@@ -750,7 +770,7 @@ class PracticePantherClient:
         return self.post("/events", body)
 
     def update_event(self, event_id: str, event_data: dict[str, Any]) -> Any:
-        return self._merge_put("/events", event_id, event_data)
+        return self._merge_put("/events", _path_id(event_id, "event_id"), event_data)
 
     # Notes
 
@@ -1012,8 +1032,8 @@ class PracticePantherClient:
 
     def list_custom_fields(self, field_type: str) -> Any:
         _validate(field_type, CUSTOM_FIELD_TYPES, "field_type")
-        return self.get(f"/customfields/{quote(str(field_type), safe='')}")
+        return self.get(f"/customfields/{_path_id(field_type, 'field_type')}")
 
     def list_tags(self, tag_type: str) -> Any:
         _validate(tag_type, TAG_TYPES, "tag_type")
-        return self.get(f"/tags/{quote(str(tag_type), safe='')}")
+        return self.get(f"/tags/{_path_id(tag_type, 'tag_type')}")

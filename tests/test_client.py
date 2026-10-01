@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from conftest import DummyResponse
 
 from practicepanther_mcp import credentials
-
-from conftest import DummyResponse
 
 
 def test_bearer_header_on_requests(client):
@@ -32,15 +31,13 @@ def test_bearer_header_on_requests(client):
 @pytest.mark.parametrize(
     ("resource_id", "escaped"),
     [
-        ("../x", "..%2Fx"),
-        ("a?b", "a%3Fb"),
-        ("a#b", "a%23b"),
-        ("a/b", "a%2Fb"),
+        ("normal-id", "normal-id"),
+        ("abc_123", "abc_123"),
+        ("record.123", "record.123"),
+        ("abc~123", "abc~123"),
     ],
 )
-def test_string_path_ids_are_percent_encoded_as_one_segment(
-    client, resource_id, escaped
-):
+def test_string_path_ids_are_preserved_as_one_segment(client, resource_id, escaped):
     urls = []
     client.session.request = lambda _method, url, **_kwargs: (
         urls.append(url) or DummyResponse(200, {"id": resource_id})
