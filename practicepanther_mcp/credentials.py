@@ -13,6 +13,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from practicepanther_mcp.private_file import write_private_file
+
 CONFIG_DIR_ENV = "PP_MCP_CONFIG_DIR"
 DEFAULT_CONFIG_DIR = Path.home() / ".practicepanther-mcp"
 DEFAULT_REDIRECT_URI = "http://localhost:8123/callback"
@@ -79,20 +81,16 @@ def _write_env_file(values: dict[str, str], path: Path | None = None) -> None:
 
     path = path or env_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        pass
+    if os.name != "nt":
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
 
     ordered_keys = [key for key in KNOWN_KEYS if key in values]
     ordered_keys.extend(key for key in values if key not in KNOWN_KEYS)
     lines = [f"{key}={values[key]}" for key in ordered_keys]
-    path.write_text("\n".join(lines) + ("\n" if lines else ""))
-
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+    write_private_file(path, "\n".join(lines) + ("\n" if lines else ""))
 
 
 def load_into_environ(keys: list[str] | None = None) -> None:
@@ -120,13 +118,12 @@ def save_values(values: dict[str, str]) -> Path:
         if value is None:
             continue
         existing[key] = str(value)
-        os.environ[key] = str(value)
 
     if not existing.get("PP_REDIRECT_URI"):
         existing["PP_REDIRECT_URI"] = DEFAULT_REDIRECT_URI
-        os.environ.setdefault("PP_REDIRECT_URI", DEFAULT_REDIRECT_URI)
 
     _write_env_file(existing)
+    os.environ.update(existing)
     return env_file()
 
 

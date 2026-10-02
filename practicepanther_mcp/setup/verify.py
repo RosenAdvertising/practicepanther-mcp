@@ -29,9 +29,8 @@ def check_api() -> bool:
         from practicepanther_mcp.client import PracticePantherClient
 
         client = PracticePantherClient()
-        me = client.get_current_user()
-        name = me.get("display_name") or me.get("email") or "unknown user"
-        print(f"Authenticated as: {name}")
+        client.get_current_user()
+        print("Authentication verified.")
 
         accounts = client.list_accounts(top=1)
         matters = client.list_matters(top=1)
@@ -40,8 +39,46 @@ def check_api() -> bool:
         print(f"Accounts readable: {account_count} returned (limit 1)")
         print(f"Matters readable: {matter_count} returned (limit 1)")
         return True
-    except Exception as exc:  # noqa: BLE001 - CLI should surface any failure
-        print(f"API check failed: {exc}")
+    except Exception as exc:  # noqa: BLE001 - CLI must not expose unknown errors
+        from practicepanther_mcp.client import (
+            ArgumentError,
+            MissingCredentialsError,
+            RateLimitError,
+            ReauthorizationError,
+            ResourceNotFoundError,
+            TransportError,
+            VendorRequestError,
+        )
+
+        safe_errors = (
+            ArgumentError,
+            MissingCredentialsError,
+            RateLimitError,
+            ReauthorizationError,
+            ResourceNotFoundError,
+            TransportError,
+            VendorRequestError,
+        )
+        if isinstance(exc, safe_errors):
+            if isinstance(exc, TransportError):
+                if exc.method not in {"GET", "HEAD", "OPTIONS"}:
+                    detail = (
+                        "PracticePanther authorization request failed; the outcome is unknown. "
+                        "Check whether authorization completed before retrying verification."
+                    )
+                else:
+                    detail = (
+                        "Could not connect to PracticePanther; check connectivity and "
+                        "retry verification."
+                    )
+            else:
+                detail = str(exc)
+        else:
+            detail = (
+                "Could not connect to PracticePanther; check connectivity and "
+                "retry verification."
+            )
+        print(f"API check failed: {detail}")
         return False
 
 

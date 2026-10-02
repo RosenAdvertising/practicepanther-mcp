@@ -6,7 +6,7 @@
 
 > [!IMPORTANT]
 > **Built to spec — not yet verified against a live PracticePanther account.**
-> This server was built from PracticePanther's public API documentation and passes its full offline test suite, but we don't currently have PracticePanther API access to verify behavior against the live API. Endpoint paths, parameters, and response shapes follow the documented spec. If you hit a discrepancy, please open an issue.
+> This server was built from PracticePanther's public API documentation and tested with mocked API responses. It has not been verified against a live account. If you hit a discrepancy, please open an issue.
 
 MCP server for PracticePanther KISS API v2: law practice management accounts,
 contacts, matters, tasks, calendar events, notes, time entries, billing reads,
@@ -15,6 +15,7 @@ activity, and metadata.
 ## Requirements
 
 - Python 3.10+
+- Python MCP SDK >=2.2,<3
 - A PracticePanther account with API access enabled
 - OAuth Client ID and Client Secret from PracticePanther
 - Claude Desktop or another MCP-compatible client
@@ -26,8 +27,7 @@ PracticePanther in-app support chat: **Support** -> **Ask us Anything**. After
 approval, PracticePanther provides or enables access to an OAuth Client ID and
 Client Secret.
 
-There is no documented sandbox. Verification uses the live account associated
-with the OAuth grant.
+Verification uses the account associated with the OAuth grant.
 
 ## Installation
 
@@ -72,8 +72,8 @@ It prints an authorization URL:
 https://app.practicepanther.com/oauth/authorize?response_type=code&client_id=...&redirect_uri=...&state=...
 ```
 
-Open that URL, approve access, copy the `code` value from the redirect, and
-paste it back into the setup prompt. Setup exchanges the code at
+Open that URL, approve access, and paste the full redirect URL back into the
+setup prompt. Setup checks the returned `state` before exchanging the code at
 `https://app.practicepanther.com/oauth/token`, saves credentials and tokens, and
 runs a live verification check.
 
@@ -87,6 +87,10 @@ All credentials and tokens are stored in:
 
 The file is written with mode `0600`; the directory is set to `0700` when
 possible.
+
+On Windows, the file is stored in the user's profile and protected by Windows'
+default per-user access rules. On POSIX, files are created with `0600` permissions
+and writes fail closed if private permissions cannot be established.
 
 | Env var | Required | Notes |
 | --- | --- | --- |
@@ -208,24 +212,35 @@ records.
 - Rate limits are undocumented. The client handles `429` defensively with
   exponential backoff and up to three retries.
 - Error body shapes beyond `{"error":"invalid_grant"}` are undocumented. The
-  client surfaces the raw response body in API exceptions.
+  client reports status and safe reason text without exposing response bodies.
 - CORS restrictions are irrelevant to this stdio MCP server; direct browser
   calls to PracticePanther should not be proxied through this package.
 
 ## Development
 
-Tests mock all HTTP and must not call the live API.
+The suite blocks `requests` network calls and uses fake credentials in an
+isolated temporary config directory. From the repository root, after installing
+the locked development dependencies:
 
 ```bash
-uv run --with pytest pytest -q
-uv build
+uv sync --locked --offline --group dev
+test_config_dir=$(mktemp -d)
+env -u PP_CLIENT_ID -u PP_CLIENT_SECRET -u PP_REDIRECT_URI \
+  -u PP_ACCESS_TOKEN -u PP_REFRESH_TOKEN \
+  PP_MCP_CONFIG_DIR="$test_config_dir" .venv/bin/python -m pytest -q
+rm -rf "$test_config_dir"
+.venv/bin/python tests/spec_check.py --mcp-only
+.venv/bin/ruff check .
+uv lock --check --offline
 ```
 
-Certification beyond the pytest suite (contract/spec-check, secrets, coverage, live smoke
-and write tiers) runs from a private cert pack with an internal MCP test toolkit; those
-artifacts are intentionally not part of this repository. Live smoke/write tiers run once
-API credentials are provisioned.
+The suite checks mocked API behavior and in-process MCP protocol behavior. It
+does not verify live PracticePanther responses or deployed transport behavior.
 
 ## License
 
 MIT
+
+During OAuth setup, paste the **full redirect URL**, including its `code` and
+`state` query parameters. Setup verifies that the returned state matches the
+browser authorization flow before exchanging the code. A code alone is rejected.

@@ -3,11 +3,18 @@
 
 from __future__ import annotations
 
+import logging
+import math
+import re
 import sys
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import quote
 
 import requests
+from mcp.server.mcpserver.exceptions import ToolError
 
 from practicepanther_mcp import credentials
 
@@ -15,8 +22,12 @@ BASE_URL = "https://app.practicepanther.com/api/v2"
 TOKEN_URL = "https://app.practicepanther.com/oauth/token"
 
 REAUTH_MESSAGE = (
-    "PracticePanther OAuth refresh failed. Re-run setup with: "
-    "practicepanther-mcp-setup"
+    "PracticePanther OAuth refresh failed. Re-run setup with: practicepanther-mcp-setup"
+)
+ACCESS_DENIED_MESSAGE = (
+    "PracticePanther access denied: the connected account lacks permission for "
+    "this action (or the authorization expired; re-run "
+    "practicepanther-mcp-setup if so)."
 )
 
 TASK_PRIORITIES = {"Low", "Medium", "High"}
@@ -25,26 +36,129 @@ MATTER_STATUSES = {"Closed", "Pending", "Open", "Archived"}
 CALL_DIRECTIONS = {"Inbound", "Outbound"}
 CUSTOM_FIELD_TYPES = {"company", "matter", "contact"}
 TAG_TYPES = {"account", "matter", "activity"}
+logger = logging.getLogger(__name__)
+
+
+def _path_id(value, parameter: str) -> str:
+    """Validate a plain identifier before URL quoting or any HTTP request."""
+    expected = (
+        "a non-empty plain identifier (ASCII letters, digits, -, _, ., ~); not . or .."
+    )
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (str, int))
+        or str(value) in {".", ".."}
+        or re.fullmatch(r"[A-Za-z0-9._~-]+", str(value)) is None
+    ):
+        message = f"Invalid argument '{parameter}': use {expected}."
+        raise ArgumentError(message)
+    return quote(str(value), safe="")
+
+
+class MissingCredentialsError(ToolError, RuntimeError):
+    pass
+
+
+class ReauthorizationError(ToolError, RuntimeError):
+    pass
+
+
+class VendorRequestError(ToolError, RuntimeError):
+    pass
+
+
+class RateLimitError(ToolError, RuntimeError):
+    pass
+
+
+class ArgumentError(ToolError, ValueError):
+    pass
+
+
+class ResourceNotFoundError(ToolError, RuntimeError):
+    pass
+
+
+class TransportError(ToolError, RuntimeError):
+    def __init__(self, method: str, *, timed_out: bool) -> None:
+        super().__init__("PracticePanther request transport failed.")
+        self.method = method.upper()
+        self.timed_out = timed_out
+
+
+_SAFE_VENDOR_REASONS = {
+    "invalid_grant": "authorization expired",
+    "unauthorized": "authorization rejected",
+    "forbidden": "access denied",
+    "not_found": "record not found",
+    "resource_not_found": "record not found",
+    "rate_limit_exceeded": "rate limit exceeded",
+    "invalid_request": "invalid request",
+    "validation_error": "invalid request",
+    "service_unavailable": "service unavailable",
+}
 
 
 def _json_response(resp: requests.Response) -> Any:
     try:
-        return resp.json()
+        body = resp.json()
     except ValueError as exc:
-        raise RuntimeError(
-            f"PracticePanther API returned non-JSON ({resp.status_code}): "
-            f"{resp.text[:400]}"
+        logger.warning(
+            "Rejected PracticePanther API response: response body was not JSON",
+            extra={
+                "event": "practicepanther_api_response_rejected",
+                "status_code": resp.status_code,
+            },
+        )
+        raise VendorRequestError(
+            f"PracticePanther request failed (HTTP {resp.status_code}: response was not valid JSON)."
         ) from exc
+    if not isinstance(body, (dict, list)):
+        logger.warning(
+            "Rejected PracticePanther API response: response had an invalid shape",
+            extra={
+                "event": "practicepanther_api_response_rejected",
+                "status_code": resp.status_code,
+            },
+        )
+        raise VendorRequestError(
+            f"PracticePanther request failed (HTTP {resp.status_code}: response had an invalid format)."
+        )
+    return body
 
 
 def _retry_after_seconds(resp: requests.Response, attempt: int) -> float:
     retry_after = resp.headers.get("Retry-After")
     if retry_after:
         try:
-            return float(retry_after)
-        except ValueError:
-            pass
-    return float(2**attempt)
+            value = float(retry_after)
+            if math.isfinite(value):
+                return max(0.0, value)
+        except (ValueError, TypeError, OverflowError):
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return min(60.0, float(2**attempt))
+
+
+def _safe_vendor_reason(resp: requests.Response) -> str:
+    try:
+        body = resp.json()
+    except (ValueError, TypeError):
+        return "request rejected"
+    if isinstance(body, dict):
+        error = body.get("error")
+        candidates = [error, body.get("code")]
+        if isinstance(error, dict):
+            candidates.append(error.get("code"))
+        for code in candidates:
+            if isinstance(code, str) and code.lower() in _SAFE_VENDOR_REASONS:
+                return _SAFE_VENDOR_REASONS[code.lower()]
+    return "request rejected"
 
 
 def _ref(resource_id: str) -> dict[str, str]:
@@ -64,8 +178,17 @@ def _user_ref(user: dict[str, Any]) -> dict[str, str]:
 
 def _validate(value: str, allowed: set[str], field_name: str) -> None:
     if value and value not in allowed:
+        logger.warning(
+            "Rejected PracticePanther request: unsupported enum value",
+            extra={
+                "event": "practicepanther_validation_rejected",
+                "field": field_name,
+            },
+        )
         valid = ", ".join(sorted(allowed))
-        raise ValueError(f"{field_name} must be one of: {valid}")
+        raise ArgumentError(
+            f"Invalid argument '{field_name}'; expected one of: {valid}."
+        )
 
 
 def _compact(values: dict[str, Any]) -> dict[str, Any]:
@@ -84,14 +207,19 @@ class PracticePantherClient:
 
     def __init__(self) -> None:
         self.creds = credentials.load_credentials()
+        self._rate_waited = 0.0
         if (
             not self.creds.client_id
             or not self.creds.client_secret
             or not self.creds.access_token
             or not self.creds.refresh_token
         ):
-            raise RuntimeError(
-                "PracticePanther credentials not found. Run: practicepanther-mcp-setup"
+            logger.warning(
+                "Rejected PracticePanther client initialization: credentials incomplete",
+                extra={"event": "practicepanther_credentials_rejected"},
+            )
+            raise MissingCredentialsError(
+                "PracticePanther credentials are missing. Set PP_CLIENT_ID, PP_CLIENT_SECRET, PP_ACCESS_TOKEN, and PP_REFRESH_TOKEN, or run: practicepanther-mcp-setup"
             )
 
         self.session = requests.Session()
@@ -116,28 +244,63 @@ class PracticePantherClient:
             body = resp.json()
         except ValueError:
             return False
-        return body.get("error") == "invalid_grant"
+        return isinstance(body, dict) and body.get("error") == "invalid_grant"
 
     def _refresh_tokens(self) -> None:
-        resp = requests.post(
-            TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": self.creds.refresh_token,
-                "client_id": self.creds.client_id,
-                "client_secret": self.creds.client_secret,
-            },
-            timeout=30,
-        )
+        try:
+            resp = requests.post(
+                TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": self.creds.refresh_token,
+                    "client_id": self.creds.client_id,
+                    "client_secret": self.creds.client_secret,
+                },
+                timeout=30,
+            )
+        except requests.Timeout as exc:
+            raise TransportError("POST", timed_out=True) from exc
+        except requests.ConnectionError as exc:
+            raise TransportError("POST", timed_out=False) from exc
 
         if not resp.ok:
-            raise RuntimeError(f"{REAUTH_MESSAGE}. Response: {resp.text[:400]}")
+            logger.warning(
+                "Rejected PracticePanther OAuth refresh: provider response was unsuccessful",
+                extra={
+                    "event": "practicepanther_oauth_refresh_rejected",
+                    "status_code": resp.status_code,
+                },
+            )
+            if resp.status_code == 403:
+                raise ReauthorizationError(ACCESS_DENIED_MESSAGE)
+            if resp.status_code in (400, 401):
+                raise ReauthorizationError(
+                    "PracticePanther authorization failed. Re-run setup with: practicepanther-mcp-setup"
+                )
+            if resp.status_code == 429:
+                wait = _retry_after_seconds(resp, 0)
+                raise RateLimitError(
+                    f"PracticePanther rate limit reached. Retry after {wait:g} seconds."
+                )
+            raise VendorRequestError(
+                f"PracticePanther request failed (HTTP {resp.status_code}: {_safe_vendor_reason(resp)})."
+            )
 
         token_data = _json_response(resp)
+        if not isinstance(token_data, dict):
+            raise ReauthorizationError(
+                "PracticePanther authorization failed. Re-run setup with: practicepanther-mcp-setup"
+            )
         access_token = token_data.get("access_token", "")
         refresh_token = token_data.get("refresh_token", "")
         if not access_token or not refresh_token:
-            raise RuntimeError(f"{REAUTH_MESSAGE}. Token response was incomplete.")
+            logger.warning(
+                "Rejected PracticePanther OAuth refresh: token response was incomplete",
+                extra={"event": "practicepanther_oauth_refresh_rejected"},
+            )
+            raise ReauthorizationError(
+                "PracticePanther authorization failed. Re-run setup with: practicepanther-mcp-setup"
+            )
 
         credentials.save_values(
             {
@@ -159,30 +322,48 @@ class PracticePantherClient:
         json_body: Any = None,
         retry_auth: bool = True,
         rate_retries: int = 0,
+        rate_waited: float | None = None,
     ) -> Any:
-        resp = self.session.request(
-            method,
-            self._url(path),
-            params=params,
-            json=json_body,
-            timeout=30,
-        )
-
-        if self._is_invalid_grant(resp) and retry_auth:
-            self._refresh_tokens()
-            return self._request(
+        if rate_waited is None:
+            rate_waited = self._rate_waited
+        try:
+            resp = self.session.request(
                 method,
-                path,
+                self._url(path),
                 params=params,
-                json_body=json_body,
-                retry_auth=False,
-                rate_retries=rate_retries,
+                json=json_body,
+                timeout=30,
+            )
+        except requests.Timeout as exc:
+            raise TransportError(method, timed_out=True) from exc
+        except requests.ConnectionError as exc:
+            raise TransportError(method, timed_out=False) from exc
+
+        if self._is_invalid_grant(resp):
+            if retry_auth:
+                self._refresh_tokens()
+                return self._request(
+                    method,
+                    path,
+                    params=params,
+                    json_body=json_body,
+                    retry_auth=False,
+                    rate_retries=rate_retries,
+                    rate_waited=rate_waited,
+                )
+            raise ReauthorizationError(
+                "PracticePanther authorization was rejected. Re-run setup with: practicepanther-mcp-setup"
             )
 
         if resp.status_code == 429 and rate_retries < 3:
             wait = _retry_after_seconds(resp, rate_retries)
+            if rate_waited + wait > 60:
+                raise RateLimitError(
+                    f"PracticePanther rate limit reached. Retry after {wait:g} seconds."
+                )
             print(f"Rate limited. Waiting {wait:g}s...", file=sys.stderr)
             time.sleep(wait)
+            self._rate_waited = rate_waited + wait
             return self._request(
                 method,
                 path,
@@ -190,11 +371,36 @@ class PracticePantherClient:
                 json_body=json_body,
                 retry_auth=retry_auth,
                 rate_retries=rate_retries + 1,
+                rate_waited=rate_waited + wait,
+            )
+
+        if resp.status_code == 429:
+            wait = _retry_after_seconds(resp, rate_retries)
+            raise RateLimitError(
+                f"PracticePanther rate limit reached. Retry after {wait:g} seconds."
             )
 
         if not resp.ok:
-            raise RuntimeError(
-                f"PracticePanther API error {resp.status_code}: {resp.text[:400]}"
+            logger.warning(
+                "Rejected PracticePanther API request: provider returned an error",
+                extra={
+                    "event": "practicepanther_api_request_rejected",
+                    "status_code": resp.status_code,
+                },
+            )
+            reason = _safe_vendor_reason(resp)
+            if resp.status_code == 401:
+                raise ReauthorizationError(
+                    "PracticePanther authorization was rejected. Re-run setup with: practicepanther-mcp-setup"
+                )
+            if resp.status_code == 403:
+                raise ReauthorizationError(ACCESS_DENIED_MESSAGE)
+            if resp.status_code == 404:
+                raise ResourceNotFoundError(
+                    "PracticePanther record was not found (HTTP 404). Check the record ID."
+                )
+            raise VendorRequestError(
+                f"PracticePanther request failed (HTTP {resp.status_code}: {reason})."
             )
 
         if resp.status_code == 204 or not resp.text:
@@ -219,21 +425,37 @@ class PracticePantherClient:
         return self.put(path, body=body, params={"id": resource_id})
 
     def _odata(
-        self, top: int = 50, skip: int = 0, order_by: str = ""
+        self, top: int = 50, skip: int = 0, order_by: str = "id asc"
     ) -> dict[str, Any]:
+        if not 1 <= top <= 200:
+            logger.warning(
+                "Rejected PracticePanther list request: top is outside allowed range",
+                extra={"event": "practicepanther_list_validation_rejected"},
+            )
+            raise ArgumentError(
+                "Invalid argument 'top'; expected an integer from 1 to 200."
+            )
+        if skip < 0:
+            logger.warning(
+                "Rejected PracticePanther list request: skip is negative",
+                extra={"event": "practicepanther_list_validation_rejected"},
+            )
+            raise ArgumentError(
+                "Invalid argument 'skip'; expected an integer zero or greater."
+            )
         params: dict[str, Any] = {"$top": top, "$skip": skip}
         if order_by:
             params["$orderby"] = order_by
         return params
 
-    def _merge_put(
-        self, path: str, resource_id: str, overlay: dict[str, Any]
-    ) -> Any:
-        current = self.get(f"{path}/{resource_id}")
+    def _merge_put(self, path: str, resource_id: str, overlay: dict[str, Any]) -> Any:
+        current = self.get(f"{path}/{_path_id(resource_id, 'resource_id')}")
         if not isinstance(current, dict):
-            raise RuntimeError(
-                f"Expected object from PracticePanther GET {path}/{resource_id}"
+            logger.warning(
+                "Rejected PracticePanther update: current resource was not an object",
+                extra={"event": "practicepanther_update_rejected"},
             )
+            raise RuntimeError("PracticePanther update source was not an object")
         body = {**current, **overlay}
         return self.put_with_id(path, resource_id, body)
 
@@ -242,13 +464,19 @@ class PracticePantherClient:
     def get_current_user(self) -> Any:
         return self.get("/users/me")
 
-    def list_users(self, email_address: str = "", top: int = 50, skip: int = 0) -> Any:
-        params = self._odata(top=top, skip=skip)
+    def list_users(
+        self,
+        email_address: str = "",
+        top: int = 50,
+        skip: int = 0,
+        order_by: str = "id asc",
+    ) -> Any:
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(_compact({"email_address": email_address}))
         return self.get("/users", params=params)
 
     def get_user(self, user_id: str) -> Any:
-        return self.get(f"/users/{user_id}")
+        return self.get(f"/users/{_path_id(user_id, 'user_id')}")
 
     # Accounts
 
@@ -261,7 +489,7 @@ class PracticePantherClient:
         updated_since: str = "",
         top: int = 50,
         skip: int = 0,
-        order_by: str = "",
+        order_by: str = "id asc",
     ) -> Any:
         params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
@@ -278,7 +506,7 @@ class PracticePantherClient:
         return self.get("/accounts", params=params)
 
     def get_account(self, account_id: str) -> Any:
-        return self.get(f"/accounts/{account_id}")
+        return self.get(f"/accounts/{_path_id(account_id, 'account_id')}")
 
     def create_account(
         self,
@@ -312,7 +540,9 @@ class PracticePantherClient:
         return self.post("/accounts", body)
 
     def update_account(self, account_id: str, account_data: dict[str, Any]) -> Any:
-        return self._merge_put("/accounts", account_id, account_data)
+        return self._merge_put(
+            "/accounts", _path_id(account_id, "account_id"), account_data
+        )
 
     # Contacts
 
@@ -324,8 +554,9 @@ class PracticePantherClient:
         company_name: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -339,7 +570,7 @@ class PracticePantherClient:
         return self.get("/contacts", params=params)
 
     def get_contact(self, contact_id: str) -> Any:
-        return self.get(f"/contacts/{contact_id}")
+        return self.get(f"/contacts/{_path_id(contact_id, 'contact_id')}")
 
     # Matters
 
@@ -352,7 +583,7 @@ class PracticePantherClient:
         matter_tag: str = "",
         top: int = 50,
         skip: int = 0,
-        order_by: str = "",
+        order_by: str = "id asc",
     ) -> Any:
         if status:
             _validate(status, MATTER_STATUSES, "status")
@@ -371,7 +602,7 @@ class PracticePantherClient:
         return self.get("/matters", params=params)
 
     def get_matter(self, matter_id: str) -> Any:
-        return self.get(f"/matters/{matter_id}")
+        return self.get(f"/matters/{_path_id(matter_id, 'matter_id')}")
 
     def create_matter(
         self,
@@ -408,7 +639,9 @@ class PracticePantherClient:
     def update_matter(self, matter_id: str, matter_data: dict[str, Any]) -> Any:
         if "status" in matter_data:
             _validate(str(matter_data["status"]), MATTER_STATUSES, "status")
-        return self._merge_put("/matters", matter_id, matter_data)
+        return self._merge_put(
+            "/matters", _path_id(matter_id, "matter_id"), matter_data
+        )
 
     # Tasks
 
@@ -422,10 +655,11 @@ class PracticePantherClient:
         due_date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
         if status:
             _validate(status, TASK_STATUSES, "status")
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -441,7 +675,7 @@ class PracticePantherClient:
         return self.get("/tasks", params=params)
 
     def get_task(self, task_id: str) -> Any:
-        return self.get(f"/tasks/{task_id}")
+        return self.get(f"/tasks/{_path_id(task_id, 'task_id')}")
 
     def create_task(
         self,
@@ -475,7 +709,7 @@ class PracticePantherClient:
             _validate(str(task_data["priority"]), TASK_PRIORITIES, "priority")
         if "status" in task_data:
             _validate(str(task_data["status"]), TASK_STATUSES, "status")
-        return self._merge_put("/tasks", task_id, task_data)
+        return self._merge_put("/tasks", _path_id(task_id, "task_id"), task_data)
 
     def complete_task(self, task_id: str) -> Any:
         return self.update_task(task_id, {"status": "Completed"})
@@ -491,8 +725,9 @@ class PracticePantherClient:
         assigned_to_user_id: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -507,7 +742,7 @@ class PracticePantherClient:
         return self.get("/events", params=params)
 
     def get_event(self, event_id: str) -> Any:
-        return self.get(f"/events/{event_id}")
+        return self.get(f"/events/{_path_id(event_id, 'event_id')}")
 
     def create_event(
         self,
@@ -535,7 +770,7 @@ class PracticePantherClient:
         return self.post("/events", body)
 
     def update_event(self, event_id: str, event_data: dict[str, Any]) -> Any:
-        return self._merge_put("/events", event_id, event_data)
+        return self._merge_put("/events", _path_id(event_id, "event_id"), event_data)
 
     # Notes
 
@@ -547,8 +782,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -585,8 +821,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -631,8 +868,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -682,8 +920,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -704,8 +943,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -726,8 +966,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -750,8 +991,9 @@ class PracticePantherClient:
         date_to: str = "",
         top: int = 50,
         skip: int = 0,
+        order_by: str = "id asc",
     ) -> Any:
-        params = self._odata(top=top, skip=skip)
+        params = self._odata(top=top, skip=skip, order_by=order_by)
         params.update(
             _compact(
                 {
@@ -790,8 +1032,8 @@ class PracticePantherClient:
 
     def list_custom_fields(self, field_type: str) -> Any:
         _validate(field_type, CUSTOM_FIELD_TYPES, "field_type")
-        return self.get(f"/customfields/{field_type}")
+        return self.get(f"/customfields/{_path_id(field_type, 'field_type')}")
 
     def list_tags(self, tag_type: str) -> Any:
         _validate(tag_type, TAG_TYPES, "tag_type")
-        return self.get(f"/tags/{tag_type}")
+        return self.get(f"/tags/{_path_id(tag_type, 'tag_type')}")

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from conftest import DummyResponse
 
 from practicepanther_mcp import credentials
-from practicepanther_mcp.client import REAUTH_MESSAGE
-
-from conftest import DummyResponse
 
 
 def test_bearer_header_on_requests(client):
@@ -27,6 +25,26 @@ def test_bearer_header_on_requests(client):
     assert client.get("/users/me") == {"ok": True}
     assert calls[0]["headers"]["Authorization"] == "Bearer old-access"
     assert calls[0]["headers"]["Accept"] == "application/json"
+    assert calls[0]["kwargs"]["timeout"] == 30
+
+
+@pytest.mark.parametrize(
+    ("resource_id", "escaped"),
+    [
+        ("normal-id", "normal-id"),
+        ("abc_123", "abc_123"),
+        ("record.123", "record.123"),
+        ("abc~123", "abc~123"),
+    ],
+)
+def test_string_path_ids_are_preserved_as_one_segment(client, resource_id, escaped):
+    urls = []
+    client.session.request = lambda _method, url, **_kwargs: (
+        urls.append(url) or DummyResponse(200, {"id": resource_id})
+    )
+    client.get_matter(resource_id)
+    assert urls[0].endswith(f"/matters/{escaped}")
+    assert "/matters/../" not in urls[0]
 
 
 def test_odata_params_serialized(client):
@@ -104,9 +122,7 @@ def test_create_account_omits_empty_primary_contact_and_includes_provided(client
     assert calls[1]["json"]["primary_contact"] == primary_contact
 
 
-def test_invalid_grant_refresh_persists_rotated_tokens_and_retries(
-    client, monkeypatch
-):
+def test_invalid_grant_refresh_persists_rotated_tokens_and_retries(client, monkeypatch):
     calls = []
 
     def fake_request(method, url, **kwargs):
@@ -163,7 +179,7 @@ def test_refresh_failure_raises_rerun_setup_error(client, monkeypatch):
 
     with pytest.raises(RuntimeError, match="practicepanther-mcp-setup") as exc:
         client.get("/users/me")
-    assert REAUTH_MESSAGE in str(exc.value)
+    assert "Re-run setup with: practicepanther-mcp-setup" in str(exc.value)
 
 
 def test_fetch_merge_put_overlay_logic(client):

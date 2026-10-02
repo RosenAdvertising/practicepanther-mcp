@@ -4,13 +4,181 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import logging
+from typing import Annotated, Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
+from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.exceptions import (
+    ResourceError,
+    ResourceNotFoundError as MCPResourceNotFoundError,
+    ToolError,
+    UnexpectedToolError,
+    UnexpectedResourceError,
+)
+from mcp.shared.exceptions import MCPError
+from mcp_types import (
+    CallToolResult,
+    InputRequiredResult,
+    TextContent,
+)
+from pydantic import ValidationError
+from pydantic import Field
 
-from practicepanther_mcp.client import PracticePantherClient
+from practicepanther_mcp.client import (
+    ArgumentError,
+    MissingCredentialsError,
+    PracticePantherClient,
+    RateLimitError,
+    ReauthorizationError,
+    ResourceNotFoundError,
+    TransportError,
+    VendorRequestError,
+)
 
-mcp = FastMCP(
+ListTop = Annotated[
+    int,
+    Field(
+        ge=1,
+        le=200,
+        description="Maximum number of records returned by this request.",
+    ),
+]
+ListSkip = Annotated[
+    int,
+    Field(ge=0, description="Number of records to skip before returning results."),
+]
+OrderBy = Annotated[
+    str,
+    Field(description="OData field and direction, for example 'updated_at desc'."),
+]
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _expected_shape(spec: dict[str, Any]) -> str:
+    if "anyOf" in spec:
+        return " or ".join(_expected_shape(option) for option in spec["anyOf"])
+    expected = str(spec.get("type", "the documented shape"))
+    if "minimum" in spec and "maximum" in spec:
+        expected += f" from {spec['minimum']} to {spec['maximum']}"
+    elif "minimum" in spec:
+        expected += f" >= {spec['minimum']}"
+    elif "maximum" in spec:
+        expected += f" <= {spec['maximum']}"
+    return expected
+
+
+def _sdk_cause(exc: BaseException) -> BaseException:
+    """Unwrap SDK wrappers without traversing arbitrary exception causes."""
+    seen = set()
+    while type(exc) in (
+        ToolError,
+        UnexpectedToolError,
+        ResourceError,
+        UnexpectedResourceError,
+    ):
+        if exc.__cause__ is None or id(exc) in seen:
+            break
+        seen.add(id(exc))
+        exc = exc.__cause__
+    return exc
+
+
+class SafeMCPServer(MCPServer):
+    """Keep expected failures actionable and unexpected failures opaque."""
+
+    def _argument_failure(self, name: str, exc: ValidationError) -> str:
+        tool = self._tool_manager.get_tool(name)
+        schema = tool.parameters.get("properties", {}) if tool else {}
+        safe_names = set(schema)
+        errors = exc.errors(include_input=False, include_url=False)
+        for error in errors:
+            location = error.get("loc", ())
+            field = location[0] if location and location[0] in safe_names else None
+            if field is not None:
+                spec = schema[field]
+                expected = _expected_shape(spec)
+                if error.get("type") == "missing":
+                    expected = f"a required {expected}"
+                return f"Invalid argument '{field}'; expected {expected}."
+        return "Invalid arguments; use the documented input schema."
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Context | None = None
+    ) -> CallToolResult | InputRequiredResult:
+        try:
+            return await super().call_tool(name, arguments, context)
+        except (MCPError, MCPResourceNotFoundError):
+            raise
+        except Exception as exc:
+            cause = _sdk_cause(exc)
+            if (
+                isinstance(exc, ToolError)
+                and not isinstance(exc, UnexpectedToolError)
+                and isinstance(cause, ValidationError)
+            ):
+                message = self._argument_failure(name, cause)
+                _logger.info("tool_call_failed reason=argument_validation")
+            elif isinstance(
+                cause,
+                (
+                    MissingCredentialsError,
+                    ReauthorizationError,
+                    VendorRequestError,
+                    RateLimitError,
+                    ArgumentError,
+                    ResourceNotFoundError,
+                ),
+            ):
+                message = str(cause)
+                _logger.info("tool_call_failed reason=anticipated")
+            elif isinstance(cause, TransportError):
+                is_write = cause.method not in {"GET", "HEAD", "OPTIONS"}
+                if is_write:
+                    action = "The outcome of this write is unknown; check whether it completed before retrying."
+                else:
+                    action = "This read can be retried."
+                if cause.timed_out:
+                    message = f"PracticePanther request timed out. {action}"
+                else:
+                    message = f"Could not connect to PracticePanther. {action}"
+                _logger.info("tool_call_failed reason=timeout")
+            else:
+                tool = self._tool_manager.get_tool(name)
+                message = f"Error executing tool {name if tool else 'unknown'}"
+                _logger.error("tool_call_failed reason=unexpected")
+            return CallToolResult(
+                content=[TextContent(type="text", text=message)], is_error=True
+            )
+
+    async def read_resource(self, uri: Any, context: Context | None = None) -> Any:
+        try:
+            return await super().read_resource(uri, context)
+        except (MCPError, MCPResourceNotFoundError):
+            raise
+        except Exception as exc:
+            cause = _sdk_cause(exc)
+            if isinstance(
+                cause,
+                (
+                    MissingCredentialsError,
+                    ReauthorizationError,
+                    VendorRequestError,
+                    RateLimitError,
+                    ArgumentError,
+                    ResourceNotFoundError,
+                ),
+            ):
+                message = str(cause)
+            else:
+                message = "PracticePanther resource read failed."
+            _logger.info("resource_read_failed reason=safe_failure")
+            raise ResourceError(message) from None
+
+
+mcp = SafeMCPServer(
     "practicepanther-mcp",
     instructions=(
         "Access PracticePanther matters, accounts, contacts, tasks, calendar, "
@@ -190,10 +358,20 @@ def get_current_user() -> dict:
 
 
 @mcp.tool()
-def list_users(email_address: str = "", top: int = 50, skip: int = 0) -> dict:
+def list_users(
+    email_address: str = "",
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
+) -> dict:
     """List firm users, optionally filtered by email address."""
 
-    return _client().list_users(email_address=email_address, top=top, skip=skip)
+    return _client().list_users(
+        email_address=email_address,
+        top=top,
+        skip=skip,
+        order_by=order_by,
+    )
 
 
 @mcp.tool()
@@ -213,9 +391,9 @@ def list_accounts(
     account_tag: str = "",
     created_since: str = "",
     updated_since: str = "",
-    top: int = 50,
-    skip: int = 0,
-    order_by: str = "",
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List client accounts with optional filters and OData pagination."""
 
@@ -285,8 +463,9 @@ def list_contacts(
     search_text: str = "",
     status: str = "",
     company_name: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List contacts with optional account, search, status, and company filters."""
 
@@ -297,6 +476,7 @@ def list_contacts(
         company_name=company_name,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -317,9 +497,9 @@ def list_matters(
     search_text: str = "",
     assigned_to_user_id: str = "",
     matter_tag: str = "",
-    top: int = 50,
-    skip: int = 0,
-    order_by: str = "",
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List legal matters with optional filters and OData pagination."""
 
@@ -389,8 +569,9 @@ def list_tasks(
     assigned_to_user_id: str = "",
     due_date_from: str = "",
     due_date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List tasks with optional filters. status: NotCompleted, InProgress, Completed, or Conditional."""
 
@@ -403,6 +584,7 @@ def list_tasks(
         due_date_to=due_date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -460,8 +642,9 @@ def list_events(
     date_from: str = "",
     date_to: str = "",
     assigned_to_user_id: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List calendar events with optional matter, account, date, and user filters."""
 
@@ -473,6 +656,7 @@ def list_events(
         assigned_to_user_id=assigned_to_user_id,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -524,8 +708,9 @@ def list_notes(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List notes with optional matter, account, and date filters."""
 
@@ -536,6 +721,7 @@ def list_notes(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -566,8 +752,9 @@ def list_time_entries(
     user_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List hourly time entries with optional account, matter, user, and date filters."""
 
@@ -579,6 +766,7 @@ def list_time_entries(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -609,8 +797,9 @@ def list_expenses(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List expenses using the mixed-case PracticePanther Expenses path."""
 
@@ -621,6 +810,7 @@ def list_expenses(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -660,8 +850,9 @@ def list_flat_fees(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List fixed-fee billing entries."""
 
@@ -672,6 +863,7 @@ def list_flat_fees(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -681,8 +873,9 @@ def list_invoices(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List invoices. Invoices are read-only in this MCP server."""
 
@@ -693,6 +886,7 @@ def list_invoices(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -702,8 +896,9 @@ def list_payments(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List payments. Payments are read-only in this MCP server."""
 
@@ -714,6 +909,7 @@ def list_payments(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
@@ -726,8 +922,9 @@ def list_call_logs(
     matter_id: str = "",
     date_from: str = "",
     date_to: str = "",
-    top: int = 50,
-    skip: int = 0,
+    top: ListTop = 50,
+    skip: ListSkip = 0,
+    order_by: OrderBy = "id asc",
 ) -> dict:
     """List phone call activity records."""
 
@@ -738,6 +935,7 @@ def list_call_logs(
         date_to=date_to,
         top=top,
         skip=skip,
+        order_by=order_by,
     )
 
 
