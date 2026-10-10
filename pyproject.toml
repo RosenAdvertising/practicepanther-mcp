@@ -5,9 +5,20 @@ build-backend = "hatchling.build"
 [project]
 name = "practicepanther-mcp"
 version = "0.1.0"
-description = "MCP server for PracticePanther — law practice management: matters, contacts, tasks, calendar, time & billing"
+description = "MCP server for PracticePanther: matters, accounts, tasks, time and billing."
 license = { text = "MIT" }
 requires-python = ">=3.10"
+classifiers = [
+    "Intended Audience :: Legal Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+]
 dependencies = ["mcp>=2.3,<3", "requests>=2.34.2", "python-dotenv>=1.2.2"]
 
 [dependency-groups]
@@ -17,6 +28,11 @@ dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
 practicepanther-mcp = "practicepanther_mcp.server:main"
 practicepanther-mcp-setup = "practicepanther_mcp.setup.setup:main"
 practicepanther-mcp-verify = "practicepanther_mcp.setup.verify:main"
+
+[project.urls]
+Homepage = "https://github.com/RosenAdvertising/practicepanther-mcp"
+Repository = "https://github.com/RosenAdvertising/practicepanther-mcp"
+Issues = "https://github.com/RosenAdvertising/practicepanther-mcp/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

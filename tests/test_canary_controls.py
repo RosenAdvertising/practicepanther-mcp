@@ -1,4 +1,4 @@
-"""Regressions for the fleet canary checks applied during migration."""
+"""Regressions for the pre-release canary checks applied during the MCP 2026-07-28 migration."""
 
 from __future__ import annotations
 
