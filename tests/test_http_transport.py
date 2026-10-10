@@ -479,3 +479,56 @@ def test_http_disconnect_cancels_an_in_flight_tool(
         assert cancelled.is_set()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("empty", ["", "   ", "\t \n"])
+def test_empty_transport_selects_stdio(
+    monkeypatch: pytest.MonkeyPatch, empty: str
+) -> None:
+    """F3: a set-but-empty PRACTICEPANTHER_MCP_TRANSPORT means stdio."""
+    monkeypatch.setenv(TRANSPORT_ENV, empty)
+    assert server._requested_transport() == "stdio"
+
+    recorded: list[str] = []
+    monkeypatch.setattr(server.mcp, "run", lambda: recorded.append("stdio-ran"))
+    server.main()
+    assert recorded == ["stdio-ran"]
+
+
+@pytest.mark.parametrize("empty", ["", "   ", "\t \n"])
+def test_empty_host_yields_loopback_default(
+    monkeypatch: pytest.MonkeyPatch, empty: str
+) -> None:
+    """F4: a set-but-empty PRACTICEPANTHER_MCP_HOST means 127.0.0.1."""
+    _clear_transport_env(monkeypatch)
+    monkeypatch.setenv(HOST_ENV, empty)
+    assert server._host() == "127.0.0.1"
+    assert server._transport_security() is None
+
+
+def test_uppercase_localhost_is_not_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F7: the host is stripped but not lower-cased; LOCALHOST is non-loopback."""
+    _clear_transport_env(monkeypatch)
+    monkeypatch.setenv(HOST_ENV, "  LOCALHOST  ")
+    assert server._host() == "LOCALHOST"
+    assert not server._is_loopback(server._host())
+    with pytest.raises(SystemExit) as excinfo:
+        server.create_serve_app()
+    assert ALLOWED_HOSTS_ENV in str(excinfo.value)
+
+
+def test_server_imports_without_installed_distribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F8: importing the server must not raise when the dist is not installed."""
+    import importlib
+    import importlib.metadata
+
+    def missing_version(*args: Any, **kwargs: Any) -> str:
+        raise importlib.metadata.PackageNotFoundError("no dist")
+
+    monkeypatch.setattr(importlib.metadata, "version", missing_version)
+    reloaded = importlib.reload(server)
+    assert reloaded.main is not None
