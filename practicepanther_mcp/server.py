@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 from typing import Annotated, Any
 
 from mcp.server import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.applications import Starlette
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import (
     ResourceError,
@@ -25,6 +29,7 @@ from mcp_types import (
 from pydantic import ValidationError
 from pydantic import Field
 
+from practicepanther_mcp import __version__
 from practicepanther_mcp.client import (
     ArgumentError,
     MissingCredentialsError,
@@ -180,6 +185,8 @@ class SafeMCPServer(MCPServer):
 
 mcp = SafeMCPServer(
     "practicepanther-mcp",
+    title="PracticePanther",
+    version=__version__,
     instructions=(
         "Access PracticePanther matters, accounts, contacts, tasks, calendar, "
         "notes, time entries, expenses, invoices, payments, activity, and metadata."
@@ -189,6 +196,83 @@ mcp = SafeMCPServer(
 
 def _client() -> PracticePantherClient:
     return PracticePantherClient()
+
+
+# Transport selection and serving (spec 2026-07-28 stateless Streamable HTTP)
+
+
+STREAMABLE_HTTP_TRANSPORT = "streamable-http"
+
+
+def _requested_transport() -> str:
+    return (
+        os.environ.get("PRACTICEPANTHER_MCP_TRANSPORT", "stdio").strip().lower()
+        or "stdio"
+    )
+
+
+def _host() -> str:
+    return (
+        os.environ.get("PRACTICEPANTHER_MCP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    )
+
+
+def _port() -> int:
+    raw = os.environ.get("PORT", "8080").strip()
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"PORT must be an integer, got {raw!r}.") from exc
+
+
+def _is_loopback(host: str) -> bool:
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _transport_security() -> TransportSecuritySettings | None:
+    """Origin and Host validation (R22); the SDK protects loopback itself."""
+    host = _host()
+    if _is_loopback(host):
+        return None
+
+    raw_hosts = os.environ.get("PRACTICEPANTHER_MCP_ALLOWED_HOSTS", "").strip()
+    allowed_hosts = [value.strip() for value in raw_hosts.split(",") if value.strip()]
+    if not allowed_hosts:
+        raise SystemExit(
+            "PRACTICEPANTHER_MCP_HOST is not a loopback address; set "
+            "PRACTICEPANTHER_MCP_ALLOWED_HOSTS to the Host header values this "
+            "server may serve, for example 'example.internal,example.internal:*'."
+        )
+    raw_origins = os.environ.get("PRACTICEPANTHER_MCP_ALLOWED_ORIGINS", "").strip()
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=[
+            value.strip() for value in raw_origins.split(",") if value.strip()
+        ],
+    )
+
+
+def create_serve_app() -> Starlette:
+    """Build the stateless 2026-07-28 Streamable HTTP app for this server."""
+    return mcp.streamable_http_app(
+        streamable_http_path="/mcp",
+        host=_host(),
+        stateless_http=True,
+        transport_security=_transport_security(),
+    )
+
+
+async def _serve_streamable_http() -> None:
+    import uvicorn
+
+    config = uvicorn.Config(
+        create_serve_app(),
+        host=_host(),
+        port=_port(),
+        access_log=False,
+    )
+    await uvicorn.Server(config).serve()
 
 
 # Resources
@@ -977,9 +1061,19 @@ def list_tags(tag_type: str) -> dict:
 
 
 def main() -> None:
-    """Run the PracticePanther MCP server over stdio."""
+    """Run the PracticePanther MCP server over stdio or Streamable HTTP."""
 
-    mcp.run()
+    transport = _requested_transport()
+    if transport == "stdio":
+        mcp.run()
+        return
+    if transport == STREAMABLE_HTTP_TRANSPORT:
+        asyncio.run(_serve_streamable_http())
+        return
+    raise SystemExit(
+        "Unsupported PRACTICEPANTHER_MCP_TRANSPORT "
+        f"{transport!r}; expected 'stdio' or '{STREAMABLE_HTTP_TRANSPORT}'."
+    )
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ activity, and metadata.
 ## Requirements
 
 - Python 3.10+
-- Python MCP SDK >=2.2,<3
+- Python MCP SDK >=2.3,<3
 - A PracticePanther account with API access enabled
 - OAuth Client ID and Client Secret from PracticePanther
 - Claude Desktop or another MCP-compatible client
@@ -141,6 +141,37 @@ Add this to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```
 
 Restart Claude Desktop after saving the config.
+
+## HTTP mode
+
+Stdio is the default. To serve stateless Streamable HTTP at `/mcp`, use the
+same PracticePanther credentials described above and set:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PRACTICEPANTHER_MCP_TRANSPORT` | `stdio` | `stdio` or `streamable-http` |
+| `PRACTICEPANTHER_MCP_HOST` | `127.0.0.1` | Address to bind |
+| `PORT` | `8080` | Integer port to listen on |
+| `PRACTICEPANTHER_MCP_ALLOWED_HOSTS` | Unset | Comma-separated allowed Host headers; required for a non-loopback bind, e.g. `example.internal,example.internal:*` |
+| `PRACTICEPANTHER_MCP_ALLOWED_ORIGINS` | Unset | Comma-separated allowed Origin headers for a non-loopback bind, e.g. `https://app.example.com`; other Origins are rejected |
+| `PP_CLIENT_ID` | Existing environment or credential file | OAuth app client ID |
+| `PP_CLIENT_SECRET` | Existing environment or credential file | OAuth app client secret |
+| `PP_REDIRECT_URI` | `http://localhost:8123/callback` | Registered redirect URI |
+| `PP_ACCESS_TOKEN` | Existing environment or credential file | Access token |
+| `PP_REFRESH_TOKEN` | Existing environment or credential file | Rotating refresh token |
+| `PP_MCP_CONFIG_DIR` | `~/.practicepanther-mcp` | Optional credential-directory override |
+
+For example, after configuring credentials:
+
+```bash
+PRACTICEPANTHER_MCP_TRANSPORT=streamable-http PORT=8080 practicepanther-mcp
+```
+
+The endpoint is `http://127.0.0.1:8080/mcp`. Loopback binds use the SDK's
+Host and Origin protection automatically. Responses retain the SDK's default
+SSE behavior so disconnecting clients cancel requests. Credentials come from
+the server environment or credential file, with environment values taking
+precedence.
 
 ## Tools
 

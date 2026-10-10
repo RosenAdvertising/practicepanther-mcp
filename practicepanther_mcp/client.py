@@ -7,6 +7,7 @@ import logging
 import math
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -37,6 +38,8 @@ CALL_DIRECTIONS = {"Inbound", "Outbound"}
 CUSTOM_FIELD_TYPES = {"company", "matter", "contact"}
 TAG_TYPES = {"account", "matter", "activity"}
 logger = logging.getLogger(__name__)
+# Tools run on worker threads; a rotating refresh token may be spent only once.
+_TOKEN_REFRESH_LOCK = threading.Lock()
 
 
 def _path_id(value, parameter: str) -> str:
@@ -206,7 +209,8 @@ class PracticePantherClient:
     """Small requests-based client for the PracticePanther KISS API v2."""
 
     def __init__(self) -> None:
-        self.creds = credentials.load_credentials()
+        with _TOKEN_REFRESH_LOCK:
+            self.creds = credentials.load_credentials()
         self._rate_waited = 0.0
         if (
             not self.creds.client_id
@@ -247,6 +251,16 @@ class PracticePantherClient:
         return isinstance(body, dict) and body.get("error") == "invalid_grant"
 
     def _refresh_tokens(self) -> None:
+        with _TOKEN_REFRESH_LOCK:
+            current = credentials.load_credentials()
+            if current.refresh_token != self.creds.refresh_token:
+                # Another request already refreshed the process's credentials.
+                self.creds = current
+                self.session.headers["Authorization"] = f"Bearer {current.access_token}"
+                return
+            self._exchange_tokens()
+
+    def _exchange_tokens(self) -> None:
         try:
             resp = requests.post(
                 TOKEN_URL,
